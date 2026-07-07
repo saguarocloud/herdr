@@ -11,9 +11,12 @@ or other upstream-owned files.
 - **Always sync with upstream.** The fork tracks `upstream/master` continuously,
   even though fork-only features are not intended to be merged upstream. Upstream
   moves fast; letting the fork drift makes each sync harder.
-- **No direct pushes to master.** Every change — feature work and upstream syncs
-  alike — goes through a pull request against `saguarocloud/herdr`. Master is
-  never force-pushed or rewritten.
+- **Fork features go through PRs.** Fork-specific work (features, fixes, docs)
+  lands on master via a pull request against `saguarocloud/herdr` — no direct
+  pushes. Upstream syncs are the exception: they are routine merges of the
+  official project and may be pushed to master directly after validation.
+- **Master is never rewritten.** No force pushes. Syncs use merge (not rebase)
+  so PR-merged fork commits are never rewritten out from under their PRs.
 - **Keep the fork surface small.** Prefer new files over editing upstream files
   where practical, and follow upstream's own conventions (see `CLAUDE.md`:
   lowercase conventional commits, no `unwrap()` in production code, state/render
@@ -32,17 +35,16 @@ git push -u origin feat/<slug>
 gh pr create --repo saguarocloud/herdr
 ```
 
-Upstream syncs also land via PR, using a merge (not a rebase — master is
-never rewritten):
+Upstream syncs run directly on master, using a merge (not a rebase — master
+is never rewritten), and may be pushed without a PR once validation passes:
 
 ```bash
+git checkout master
 git fetch upstream
-git checkout -b sync/upstream-$(date +%Y%m%d) master
 git merge upstream/master               # resolve any conflicts with fork features
 ./.local/build-macos.sh nextest run     # validate (see build notes below)
 cargo fmt --check
-git push -u origin sync/upstream-$(date +%Y%m%d)
-gh pr create --repo saguarocloud/herdr
+git push origin master
 ```
 
 Notes:
@@ -116,7 +118,7 @@ native non-terminal UI.
 - **2026-07-06:** statusline v1 (segments/tokens/commands), v2 (widgets,
   per-segment colors, mouse), v3 (animated effects, mode widget, gradients).
 - **2026-07-07:** first upstream sync with the feature — rebased onto upstream
-  `5b4450c` (23 commits) with zero conflicts; pushed as `aa91f3b`. (Predates the
-  PR-only rule; syncs are merge-based PRs from here on.)
-- **2026-07-07:** adopted PR-only workflow — all changes, including upstream
-  syncs, land on master via pull request.
+  `5b4450c` (23 commits) with zero conflicts; pushed as `aa91f3b`. (Syncs are
+  merge-based from here on.)
+- **2026-07-07:** adopted the PR workflow — fork-specific changes land on
+  master via pull request; upstream syncs merge directly to master.
