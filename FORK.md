@@ -2,7 +2,7 @@
 
 This is a personal fork of [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr).
 This file documents fork policy, fork-only features, and the maintenance workflow.
-It exists only in the fork, so it never conflicts with upstream during rebases —
+It exists only in the fork, so it never conflicts with upstream during syncs —
 prefer adding fork documentation here instead of editing `CLAUDE.md`, `README.md`,
 or other upstream-owned files.
 
@@ -11,31 +11,45 @@ or other upstream-owned files.
 - **Always sync with upstream.** The fork tracks `upstream/master` continuously,
   even though fork-only features are not intended to be merged upstream. Upstream
   moves fast; letting the fork drift makes each sync harder.
-- **Fork commits ride on top.** `master` is always `upstream/master` plus a small
-  stack of fork-only commits, maintained by rebase (not merge). History stays
-  linear and it is always obvious what the fork adds.
+- **Fork features go through PRs.** Fork-specific work (features, fixes, docs)
+  lands on master via a pull request against `saguarocloud/herdr` — no direct
+  pushes. Upstream syncs are the exception: they are routine merges of the
+  official project and may be pushed to master directly after validation.
+- **Master is never rewritten.** No force pushes. Syncs use merge (not rebase)
+  so PR-merged fork commits are never rewritten out from under their PRs.
 - **Keep the fork surface small.** Prefer new files over editing upstream files
   where practical, and follow upstream's own conventions (see `CLAUDE.md`:
   lowercase conventional commits, no `unwrap()` in production code, state/render
-  separation) so fork commits rebase cleanly.
+  separation) so upstream merges stay clean.
 - Upstream's external-contributor rules in `CLAUDE.md` still apply if anything
   here is ever proposed upstream: discussions first, no unsolicited PRs.
 
-## Sync workflow
+## Workflow
+
+Feature work happens on branches and lands via PR:
 
 ```bash
+git checkout -b feat/<slug> master
+# ... work, validate ...
+git push -u origin feat/<slug>
+gh pr create --repo saguarocloud/herdr
+```
+
+Upstream syncs run directly on master, using a merge (not a rebase — master
+is never rewritten), and may be pushed without a PR once validation passes:
+
+```bash
+git checkout master
 git fetch upstream
-git rebase upstream/master          # replay fork commits on the new upstream tip
-./.local/build-macos.sh nextest run # validate (see build notes below)
+git merge upstream/master               # resolve any conflicts with fork features
+./.local/build-macos.sh nextest run     # validate (see build notes below)
 cargo fmt --check
-git push origin master              # force-push only needed if fork commits were rewritten
+git push origin master
 ```
 
 Notes:
 
-- After a rebase rewrites the fork commits, `git push --force-with-lease origin master`
-  is expected — the fork's master is a rebased branch, that is by design.
-- Rebuild and restart after syncing: `./.local/build-macos.sh` then
+- Rebuild and restart after a sync lands: `./.local/build-macos.sh` then
   `herdr server live-handoff`. The handoff moves live panes to a new server
   process without killing them, which matters because dev sessions usually run
   *inside* herdr. `~/bin/herdr` symlinks to `target/release/herdr`, so both the
@@ -104,4 +118,7 @@ native non-terminal UI.
 - **2026-07-06:** statusline v1 (segments/tokens/commands), v2 (widgets,
   per-segment colors, mouse), v3 (animated effects, mode widget, gradients).
 - **2026-07-07:** first upstream sync with the feature — rebased onto upstream
-  `5b4450c` (23 commits) with zero conflicts; pushed as `aa91f3b`.
+  `5b4450c` (23 commits) with zero conflicts; pushed as `aa91f3b`. (Syncs are
+  merge-based from here on.)
+- **2026-07-07:** adopted the PR workflow — fork-specific changes land on
+  master via pull request; upstream syncs merge directly to master.
