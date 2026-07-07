@@ -30,6 +30,7 @@ const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
+const SOURCE_UPDATE_COMMAND: &str = "sync the source checkout and rebuild";
 const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
@@ -1724,7 +1725,9 @@ fn print_running_session_update_outcomes(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update_install_command() -> &'static str {
-    if is_homebrew_managed_install() {
+    if is_source_build_install() {
+        SOURCE_UPDATE_COMMAND
+    } else if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
     } else if is_mise_managed_install() {
         MISE_UPDATE_COMMAND
@@ -1737,6 +1740,9 @@ pub(crate) fn update_install_command() -> &'static str {
 
 pub(crate) fn update_install_instruction(install_command: &str) -> String {
     match install_command {
+        SOURCE_UPDATE_COMMAND => {
+            "source build: sync the checkout with upstream, rebuild, then restart this Herdr session".to_string()
+        }
         HERDR_UPDATE_COMMAND => {
             "detach, run `herdr update`, then follow its restart guidance".to_string()
         }
@@ -1776,6 +1782,14 @@ fn is_mise_managed_install() -> bool {
     };
 
     is_mise_managed_exe_path_following_links(&current_exe)
+}
+
+fn is_source_build_install() -> bool {
+    let Ok(current_exe) = env::current_exe() else {
+        return false;
+    };
+
+    is_cargo_target_exe_path_following_links(&current_exe)
 }
 
 pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
@@ -1847,6 +1861,38 @@ fn is_mise_managed_exe_path_following_links(path: &Path) -> bool {
 
     path.canonicalize()
         .is_ok_and(|path| is_mise_managed_exe_path(&path))
+}
+
+fn is_cargo_target_exe_path_following_links(path: &Path) -> bool {
+    if is_cargo_target_exe_path(path) {
+        return true;
+    }
+
+    path.canonicalize()
+        .is_ok_and(|path| is_cargo_target_exe_path(&path))
+}
+
+fn is_cargo_target_exe_path(path: &Path) -> bool {
+    cargo_target_checkout_root(path).is_some_and(|checkout| checkout.join("Cargo.toml").is_file())
+}
+
+/// Cargo build layout: `<checkout>/target/<profile>/herdr` for native builds or
+/// `<checkout>/target/<triple>/<profile>/herdr` for cross builds. Returns the
+/// checkout directory that owns the `target` dir.
+fn cargo_target_checkout_root(path: &Path) -> Option<&Path> {
+    if path.file_stem()? != "herdr" {
+        return None;
+    }
+
+    let mut dir = path.parent()?;
+    for _ in 0..2 {
+        let parent = dir.parent()?;
+        if parent.file_name().is_some_and(|name| name == "target") {
+            return parent.parent();
+        }
+        dir = parent;
+    }
+    None
 }
 
 fn is_nix_store_exe_path(path: &Path) -> bool {
@@ -1982,6 +2028,12 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         }
         return Err(
             "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr".into(),
+        );
+    }
+
+    if is_source_build_install() {
+        return Err(
+            "self-update is disabled for source builds; installing a release binary would replace the local build. Sync the checkout with upstream and rebuild instead".into(),
         );
     }
 
@@ -2393,6 +2445,86 @@ mod tests {
         let path = Path::new("/usr/local/bin/herdr");
 
         assert!(!is_homebrew_managed_exe_path(path));
+    }
+
+    #[test]
+    fn cargo_target_profile_path_is_detected() {
+        let path = Path::new("/home/user/herdr/target/release/herdr");
+
+        assert_eq!(
+            cargo_target_checkout_root(path).unwrap(),
+            Path::new("/home/user/herdr")
+        );
+    }
+
+    #[test]
+    fn cargo_target_cross_build_path_is_detected() {
+        let path = Path::new("/home/user/herdr/target/aarch64-apple-darwin/release/herdr");
+
+        assert_eq!(
+            cargo_target_checkout_root(path).unwrap(),
+            Path::new("/home/user/herdr")
+        );
+    }
+
+    #[test]
+    fn cargo_target_exe_suffix_path_is_detected() {
+        let path = Path::new("/home/user/herdr/target/debug/herdr.exe");
+
+        assert_eq!(
+            cargo_target_checkout_root(path).unwrap(),
+            Path::new("/home/user/herdr")
+        );
+    }
+
+    #[test]
+    fn direct_install_path_is_not_cargo_target() {
+        assert_eq!(
+            cargo_target_checkout_root(Path::new("/home/user/.local/bin/herdr")),
+            None
+        );
+    }
+
+    #[test]
+    fn non_herdr_binary_under_target_is_not_cargo_target() {
+        assert_eq!(
+            cargo_target_checkout_root(Path::new("/home/user/herdr/target/release/other")),
+            None
+        );
+    }
+
+    #[test]
+    fn build_script_output_under_target_is_not_cargo_target() {
+        assert_eq!(
+            cargo_target_checkout_root(Path::new(
+                "/home/user/herdr/target/release/build/foo/out/herdr"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn cargo_target_exe_requires_checkout_manifest() {
+        let root = std::env::temp_dir().join(format!("herdr-source-detect-{}", std::process::id()));
+        let bin_dir = root.join("target").join("release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("herdr");
+        std::fs::write(&exe, b"").unwrap();
+
+        assert!(!is_cargo_target_exe_path(&exe));
+
+        std::fs::write(root.join("Cargo.toml"), b"[package]\n").unwrap();
+        assert!(is_cargo_target_exe_path(&exe));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_build_instruction_points_at_sync_and_rebuild() {
+        let instruction = update_install_instruction(SOURCE_UPDATE_COMMAND);
+
+        assert!(instruction.contains("sync the checkout with upstream"));
+        assert!(instruction.contains("rebuild"));
     }
 
     #[test]
