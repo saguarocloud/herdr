@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        GlobalMenuAnchor, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -19,7 +19,7 @@ use super::WheelRouting;
 use super::{
     modal::{
         apply_global_menu_action, confirm_close_cancel, global_menu_actions, leave_modal,
-        modal_action_from_buttons, open_global_menu, open_new_tab_dialog, ModalAction,
+        modal_action_from_buttons, open_global_menu_with_anchor, open_new_tab_dialog, ModalAction,
     },
     settings::SettingsAction,
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
@@ -60,6 +60,12 @@ pub(super) enum MouseAction {
 }
 
 enum MobileMouseResult {
+    Ignored,
+    Consumed,
+    Action(MouseAction),
+}
+
+enum StatuslineMouseResult {
     Ignored,
     Consumed,
     Action(MouseAction),
@@ -148,11 +154,38 @@ impl AppState {
             return None;
         }
 
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && launcher_hit {
+        // The status-line menu button mirrors the launcher, but is deliberately
+        // NOT gated on sidebar_collapsed — with a hidden sidebar the bar button
+        // is the only mouse path to the menu.
+        let statusline_menu_hit = self.view.layout != ViewLayout::Mobile
+            && matches!(
+                self.mode,
+                Mode::Terminal
+                    | Mode::Navigate
+                    | Mode::Resize
+                    | Mode::GlobalMenu
+                    | Mode::KeybindHelp
+            )
+            && rect_contains(
+                self.view.statusline_hits.menu_button,
+                mouse.column,
+                mouse.row,
+            );
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && (launcher_hit || statusline_menu_hit)
+        {
             if self.mode == Mode::GlobalMenu {
                 leave_modal(self);
             } else {
-                open_global_menu(self);
+                open_global_menu_with_anchor(
+                    self,
+                    if statusline_menu_hit {
+                        GlobalMenuAnchor::Statusline
+                    } else {
+                        GlobalMenuAnchor::Launcher
+                    },
+                );
             }
             return None;
         }
@@ -170,6 +203,12 @@ impl AppState {
 
         if self.mode == Mode::KeybindHelp {
             return None;
+        }
+
+        match self.statusline_mouse(mouse) {
+            StatuslineMouseResult::Ignored => {}
+            StatuslineMouseResult::Consumed => return None,
+            StatuslineMouseResult::Action(action) => return Some(action),
         }
 
         if self.view.layout == ViewLayout::Mobile {
@@ -1102,6 +1141,53 @@ impl AppState {
         None
     }
 
+    /// Clicks and wheel events on the status line. Mode-gated so bar clicks
+    /// can't hijack confirm/rename/worktree/context-menu interactions that are
+    /// handled later in the `Down(Left)` arm. The menu button has its own
+    /// earlier branch (shared with the sidebar launcher).
+    fn statusline_mouse(&mut self, mouse: MouseEvent) -> StatuslineMouseResult {
+        if self.view.layout == ViewLayout::Mobile
+            || !rect_contains(self.view.statusline_rect, mouse.column, mouse.row)
+            || !matches!(self.mode, Mode::Terminal | Mode::Navigate | Mode::Resize)
+        {
+            return StatuslineMouseResult::Ignored;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let chip = self
+                    .view
+                    .statusline_hits
+                    .workspace_entries
+                    .iter()
+                    .find(|hit| rect_contains(hit.rect, mouse.column, mouse.row))
+                    .map(|hit| hit.ws_idx);
+                if let Some(ws_idx) = chip {
+                    self.mode = Mode::Terminal;
+                    return StatuslineMouseResult::Action(MouseAction::FocusWorkspace { ws_idx });
+                }
+                // The bar swallows stray left clicks so they can't reach pane
+                // forwarding or selection handling underneath.
+                StatuslineMouseResult::Consumed
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Wheel-cycling is tied to the workspaces widget; widget-less
+                // bars keep today's behavior (scroll reaches the terminal).
+                if !self.view.statusline_hits.has_workspaces_widget || self.workspaces.len() < 2 {
+                    return StatuslineMouseResult::Ignored;
+                }
+                let count = self.workspaces.len();
+                let current = self.active.unwrap_or(0).min(count - 1);
+                let ws_idx = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    (current + count - 1) % count
+                } else {
+                    (current + 1) % count
+                };
+                StatuslineMouseResult::Action(MouseAction::FocusWorkspace { ws_idx })
+            }
+            _ => StatuslineMouseResult::Ignored,
+        }
+    }
+
     fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
         if self.mode == Mode::Navigate {
             match mouse.kind {
@@ -1859,6 +1945,158 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    fn statusline_test_app() -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        // Bar row below the sidebar/terminal areas set by app_for_mouse_test.
+        app.state.view.statusline_rect = Rect::new(0, 20, 106, 1);
+        app.state.view.statusline_hits.menu_button = Rect::new(3, 20, 3, 1);
+        app.state.view.statusline_hits.workspace_entries = vec![
+            crate::app::state::StatusWorkspaceHit {
+                ws_idx: 0,
+                rect: Rect::new(10, 20, 8, 1),
+            },
+            crate::app::state::StatusWorkspaceHit {
+                ws_idx: 1,
+                rect: Rect::new(18, 20, 8, 1),
+            },
+            crate::app::state::StatusWorkspaceHit {
+                ws_idx: 2,
+                rect: Rect::new(26, 20, 8, 1),
+            },
+        ];
+        app.state.view.statusline_hits.has_workspaces_widget = true;
+        app
+    }
+
+    #[tokio::test]
+    async fn statusline_menu_button_toggles_global_menu_with_statusline_anchor() {
+        let mut app = statusline_test_app();
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 20),
+        );
+        assert!(action.is_none());
+        assert_eq!(app.state.mode, Mode::GlobalMenu);
+        assert_eq!(
+            app.state.global_menu_anchor,
+            crate::app::state::GlobalMenuAnchor::Statusline
+        );
+
+        // Second click on the button closes the menu again.
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 20),
+        );
+        assert!(action.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn statusline_workspace_chip_click_focuses_workspace() {
+        let mut app = statusline_test_app();
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), 19, 20),
+        );
+        assert!(
+            matches!(action, Some(MouseAction::FocusWorkspace { ws_idx: 1 })),
+            "chip click focuses its workspace"
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        // A stray click on the bar (not on any chip) is swallowed.
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), 90, 20),
+        );
+        assert!(action.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn statusline_clicks_ignored_during_modal_modes() {
+        let mut app = statusline_test_app();
+        app.state.mode = Mode::ConfirmClose;
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::Down(MouseButton::Left), 19, 20),
+        );
+        assert!(
+            !matches!(action, Some(MouseAction::FocusWorkspace { .. })),
+            "bar clicks must not hijack confirm-close interactions"
+        );
+        assert_ne!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn statusline_wheel_cycles_workspaces_only_with_widget() {
+        let mut app = statusline_test_app();
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::ScrollDown, 50, 20),
+        );
+        assert!(matches!(
+            action,
+            Some(MouseAction::FocusWorkspace { ws_idx: 1 })
+        ));
+
+        // ScrollUp from workspace 0 wraps to the last workspace.
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::ScrollUp, 50, 20),
+        );
+        assert!(matches!(
+            action,
+            Some(MouseAction::FocusWorkspace { ws_idx: 2 })
+        ));
+
+        // Without the workspaces widget the wheel falls through (terminal
+        // scroll keeps today's behavior).
+        app.state.view.statusline_hits.has_workspaces_widget = false;
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            mouse(MouseEventKind::ScrollUp, 50, 20),
+        );
+        assert!(action.is_none());
+    }
+
+    #[tokio::test]
+    async fn global_menu_rect_anchors_to_statusline_button() {
+        let mut app = statusline_test_app();
+        app.state.global_menu_anchor = crate::app::state::GlobalMenuAnchor::Statusline;
+
+        // Bottom bar: dropdown sits directly above the button.
+        let rect = app.state.global_menu_rect();
+        let button = app.state.view.statusline_hits.menu_button;
+        assert_eq!(rect.x, button.x);
+        assert_eq!(rect.y + rect.height, button.y);
+
+        // Top bar: dropdown opens below the button.
+        app.state.statusline.position = crate::config::StatusLinePosition::Top;
+        app.state.view.statusline_rect = Rect::new(0, 0, 106, 1);
+        app.state.view.statusline_hits.menu_button = Rect::new(3, 0, 3, 1);
+        let rect = app.state.global_menu_rect();
+        assert_eq!(rect.y, 1);
+
+        // Fallback: button gone (e.g. hot-reloaded away) -> launcher anchor.
+        app.state.view.statusline_hits.menu_button = Rect::default();
+        let fallback = app.state.global_menu_rect();
+        app.state.global_menu_anchor = crate::app::state::GlobalMenuAnchor::Launcher;
+        assert_eq!(fallback, app.state.global_menu_rect());
     }
 
     #[tokio::test]

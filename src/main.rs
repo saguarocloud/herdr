@@ -332,6 +332,67 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sound.agents]
 # droid = "off"
 
+# tmux-style status line: a full-width row of left/right segments.
+# Segment shapes (exactly one of text/command/widget per table):
+#   "plain string"                                  plain text with tokens
+#   { text = "...", style = "dim", fg = "mauve" }   styled text with tokens
+#   { command = ["sh", "-c", "..."], style = "accent" }   shell command output
+#   { widget = "menu" | "workspaces" | "agents" | "mode" }   built-in widget
+# Built-in tokens (substituted at render time):
+#   #{session} #{workspace} #{tab} #{pane_index} #{pane_count} #{mode}
+#   #{agents_blocked} #{agents_working} #{agents_done} #{agents_idle}
+#   #{agents_total} #{time} #{time:%H:%M:%S}   (strftime: %H %M %S %I %p
+#                                               %d %m %Y %y %a %b %%)
+# Widgets:
+#   menu        clickable ☰ button opening the herdr menu (same as the sidebar
+#               launcher; works with a hidden sidebar). Hidden when
+#               ui.mouse_capture is off. The dropdown opens above a bottom bar
+#               and below a top bar.
+#   workspaces  clickable numbered workspace list. The active workspace is
+#               highlighted on the theme accent; each entry shows an animated
+#               spinner while its agents work, ◉ when one is blocked, and the
+#               name is colored by agent state. Click an entry to switch;
+#               mouse-wheel over the bar cycles workspaces.
+#   agents      compact rollup of agent states across all workspaces:
+#               ◉ blocked, spinner working, ● done, ✓ idle — glyph + count,
+#               zero-count states hidden.
+#   mode        key-mode chip (PREFIX/COPY/RESIZE/NAV), each inverted onto its
+#               own theme color; hidden outside those modes.
+# Per-segment style presets: normal | accent | dim | bold | gradient (per-
+# character accent→mauve fade; the fg override replaces the start color).
+# Text and command segments also accept optional fg/bg color overrides: a
+# theme palette token
+#   accent panel_bg surface0 surface1 surface_dim overlay0 overlay1 text
+#   subtext0 mauve green yellow red blue teal peach
+# or "#rrggbb", "#rgb", "rgb(r,g,b)", ANSI names, "none". Palette tokens win
+# over same-named ANSI colors ("red" is the theme red; use "#ff0000" for raw
+# red), so the bar follows your theme. Unknown colors are ignored (warned once
+# in the log at load).
+# When the bar is too narrow the right side wins; workspace entries truncate
+# or drop (the active workspace always stays visible, marked by a trailing …).
+# Command segments run in the active workspace directory; only the first line
+# of stdout is shown.
+# Animated effects (blocked pulse, spinner shimmer, active-chip gradient) are
+# on by default; set effects = false for a fully static bar. Effects need a
+# true-color theme; ANSI-indexed themes render the static colors instead.
+# [ui.statusline]
+# enabled = true
+# position = "bottom"        # or "top"
+# interval = "2s"            # refresh cadence for command segments and the clock
+# effects = true             # animated color effects (pulse/shimmer/gradients)
+# left = [
+#   { widget = "mode" },
+#   { widget = "menu" },
+#   { text = " #{session} ", style = "gradient" },
+#   { widget = "workspaces" },
+# ]
+# right = [
+#   { command = ["sh", "-c", "git branch --show-current"], style = "accent" },
+#   " ",
+#   { widget = "agents" },
+#   { text = " #{time:%H:%M} ", style = "dim" },
+# ]
+
 [session]
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.

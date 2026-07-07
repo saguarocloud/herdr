@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod effects;
 mod keybind_help;
 mod menus;
 mod mobile;
@@ -17,6 +18,7 @@ mod scrollbar;
 mod settings;
 mod sidebar;
 mod status;
+mod statusline;
 mod tabs;
 mod text;
 mod widgets;
@@ -186,6 +188,27 @@ fn resize_background_tab_panes_for_desktop(
     }
 }
 
+/// Reserve a full-width status-line row at the top or bottom of the frame.
+/// Returns `(statusline_rect, body_area)`; the row is empty and `body_area`
+/// equals `area` when the status line is inactive or the frame is too short.
+fn compute_statusline_layout(app: &AppState, area: Rect) -> (Rect, Rect) {
+    if !app.statusline.active() || area.height < 2 {
+        return (Rect::default(), area);
+    }
+    match app.statusline.position {
+        crate::config::StatusLinePosition::Bottom => {
+            let [body, bar] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            (bar, body)
+        }
+        crate::config::StatusLinePosition::Top => {
+            let [bar, body] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            (bar, body)
+        }
+    }
+}
+
 fn desktop_tab_bar_and_terminal_area(
     app: &AppState,
     ws: &crate::workspace::Workspace,
@@ -223,8 +246,10 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
+    let (statusline_rect, body_area) = compute_statusline_layout(app, area);
+
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(body_area);
 
     let (tab_bar_rect, terminal_area) = app
         .active
@@ -301,9 +326,15 @@ fn compute_view_internal(
         })
         .unwrap_or_default();
 
+    // Same pure builder render_statusline draws from, so hit rects and pixels
+    // can never diverge within a frame.
+    let statusline_hits = self::statusline::build_statusline_content(app, statusline_rect).hits;
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
+        statusline_rect,
+        statusline_hits,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -374,6 +405,8 @@ fn compute_mobile_view(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
+        statusline_rect: Rect::default(),
+        statusline_hits: Default::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -418,6 +451,10 @@ pub fn render_with_runtime_registry(
         render_tab_bar(app, frame, tab_bar_area);
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
+
+    if app.view.layout != ViewLayout::Mobile && app.view.statusline_rect.height > 0 {
+        self::statusline::render_statusline(app, frame, app.view.statusline_rect);
+    }
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
@@ -654,6 +691,94 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position((focused.inner_rect.x + 4, focused.inner_rect.y));
+    }
+
+    #[test]
+    fn statusline_reserves_bottom_row_and_renders_tokens() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.statusline.enabled = true;
+        app.statusline.session_name = "work".into();
+        app.statusline.left = vec![crate::config::StatusSegment::Text("#{session}".into())];
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        // Full-width row reserved at the bottom; terminal area shrinks by one row.
+        assert_eq!(app.view.statusline_rect, Rect::new(0, 19, 80, 1));
+        assert_eq!(app.view.terminal_area.height, 18);
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom: String = (0..4).map(|x| buffer[(x, 19)].symbol()).collect();
+        assert_eq!(bottom, "work");
+    }
+
+    #[test]
+    fn statusline_disabled_leaves_full_height_terminal() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        assert_eq!(app.view.statusline_rect, Rect::default());
+        assert_eq!(
+            app.view.statusline_hits,
+            crate::app::state::StatuslineHitAreas::default()
+        );
+        // Tab bar (1 row) + terminal fill the whole height with no reserved row.
+        assert_eq!(app.view.terminal_area.height, 19);
+    }
+
+    #[test]
+    fn statusline_hit_areas_are_stored_in_view_state() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.mouse_capture = true;
+        app.statusline.enabled = true;
+        app.statusline.left = vec![
+            crate::config::StatusSegment::Widget {
+                widget: crate::config::StatusWidget::Menu,
+            },
+            crate::config::StatusSegment::Widget {
+                widget: crate::config::StatusWidget::Workspaces,
+            },
+        ];
+        app.statusline.right = vec![crate::config::StatusSegment::Text("#{time:%H}".into())];
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let bar = app.view.statusline_rect;
+        assert_eq!(bar, Rect::new(0, 39, 120, 1));
+        let hits = &app.view.statusline_hits;
+        assert!(hits.has_workspaces_widget);
+
+        // Menu button is the first item, on the bar row.
+        assert_eq!(hits.menu_button.y, bar.y);
+        assert_eq!(hits.menu_button.x, bar.x);
+        assert!(hits.menu_button.width > 0);
+
+        // Workspace chips in order, adjacent, and inside the bar.
+        assert_eq!(hits.workspace_entries.len(), 2);
+        assert_eq!(hits.workspace_entries[0].ws_idx, 0);
+        assert_eq!(hits.workspace_entries[1].ws_idx, 1);
+        let first = hits.workspace_entries[0].rect;
+        let second = hits.workspace_entries[1].rect;
+        assert_eq!(first.x, hits.menu_button.x + hits.menu_button.width);
+        assert_eq!(first.x + first.width, second.x);
+        assert!(second.x + second.width <= bar.x + bar.width);
+        assert_eq!(first.y, bar.y);
     }
 
     #[test]

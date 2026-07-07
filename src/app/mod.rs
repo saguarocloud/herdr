@@ -109,6 +109,9 @@ pub struct App {
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
+    pub(crate) statusline_interval: Duration,
+    pub(crate) last_statusline_refresh: Instant,
+    pub(crate) statusline_refresh_in_flight: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
@@ -242,6 +245,52 @@ fn parse_cjk_ime_agents(names: &[String]) -> Vec<crate::detect::Agent> {
         }
     }
     out
+}
+
+/// Project the `[ui.statusline]` config onto the pure `StatusLineRuntime`,
+/// resolving the session name once from the environment.
+fn build_statusline_runtime(config: &crate::config::StatusLineConfig) -> state::StatusLineRuntime {
+    warn_invalid_statusline_colors(config);
+    let session_name = std::env::var(crate::session::SESSION_ENV_VAR)
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    state::StatusLineRuntime {
+        enabled: config.enabled,
+        position: config.position,
+        effects: config.effects,
+        left: config.left.clone(),
+        right: config.right.clone(),
+        session_name,
+        command_outputs: std::collections::HashMap::new(),
+    }
+}
+
+/// Warn once — at load or hot-reload, never on the render path — about
+/// `fg`/`bg` specs that neither the palette nor `parse_color_opt` recognize.
+/// Render silently ignores them, so without this a typo would be invisible.
+fn warn_invalid_statusline_colors(config: &crate::config::StatusLineConfig) {
+    // Palette token names are theme-independent, so any palette works here.
+    let palette = state::Palette::catppuccin();
+    for (side, segments) in [("left", &config.left), ("right", &config.right)] {
+        for segment in segments {
+            let (fg, bg) = segment.color_overrides();
+            for (field, spec) in [("fg", fg), ("bg", bg)] {
+                if let Some(spec) = spec {
+                    if palette.color_token(spec).is_none()
+                        && crate::config::parse_color_opt(spec).is_none()
+                    {
+                        tracing::warn!(
+                            side,
+                            field,
+                            color = spec,
+                            "unknown statusline color; override ignored"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn normalize_theme_name(name: &str) -> String {
@@ -556,6 +605,8 @@ impl App {
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                statusline_rect: Rect::default(),
+                statusline_hits: state::StatuslineHitAreas::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -626,6 +677,7 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
+            statusline: build_statusline_runtime(&config.ui.statusline),
             keybinds: config.keybinds(),
             spinner_tick: 0,
             palette: theme_palette,
@@ -649,6 +701,7 @@ impl App {
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
             global_menu: state::MenuListState::new(0),
+            global_menu_anchor: state::GlobalMenuAnchor::default(),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
@@ -700,6 +753,10 @@ impl App {
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
+            statusline_interval: config.ui.statusline.interval_duration(),
+            // Refresh command segments and the clock on the first loop.
+            last_statusline_refresh: Instant::now() - config.ui.statusline.interval_duration(),
+            statusline_refresh_in_flight: false,
             git_status_cache: HashMap::new(),
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
@@ -1382,6 +1439,19 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
+                // Live-apply status line edits without a server restart. Keep the
+                // resolved session name; drop cached command output and force a
+                // prompt refresh so edited segments/indexes repopulate correctly.
+                warn_invalid_statusline_colors(&config.ui.statusline);
+                self.state.statusline.enabled = config.ui.statusline.enabled;
+                self.state.statusline.position = config.ui.statusline.position;
+                self.state.statusline.effects = config.ui.statusline.effects;
+                self.state.statusline.left = config.ui.statusline.left.clone();
+                self.state.statusline.right = config.ui.statusline.right.clone();
+                self.state.statusline.command_outputs.clear();
+                self.statusline_interval = config.ui.statusline.interval_duration();
+                self.last_statusline_refresh =
+                    Instant::now() - config.ui.statusline.interval_duration();
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.agent_panel_scroll = 0;
@@ -2570,6 +2640,73 @@ mod tests {
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "reloaded config");
         assert_eq!(toast.context, "using config.toml");
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_applies_statusline_widgets_and_colors() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-statusline");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r##"
+[ui.statusline]
+enabled = true
+position = "top"
+interval = "1s"
+left = [
+  { text = " #{mode} ", style = "bold", fg = "mauve" },
+  { widget = "menu" },
+  { widget = "workspaces" },
+]
+right = [
+  { command = ["sh", "-c", "true"], style = "accent" },
+  { widget = "agents" },
+]
+"##,
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.statusline.session_name = "kept".into();
+        app.state
+            .statusline
+            .command_outputs
+            .insert((state::StatusSide::Left, 0), "stale".into());
+
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+
+        let sl = &app.state.statusline;
+        assert!(sl.enabled);
+        assert_eq!(sl.position, crate::config::StatusLinePosition::Top);
+        assert_eq!(sl.left.len(), 3);
+        assert!(matches!(
+            sl.left[1],
+            crate::config::StatusSegment::Widget {
+                widget: crate::config::StatusWidget::Menu
+            }
+        ));
+        assert!(matches!(
+            &sl.left[0],
+            crate::config::StatusSegment::Styled { fg: Some(fg), .. } if fg == "mauve"
+        ));
+        assert!(matches!(
+            sl.right[1],
+            crate::config::StatusSegment::Widget {
+                widget: crate::config::StatusWidget::Agents
+            }
+        ));
+        // Cached command output cleared; resolved session name preserved.
+        assert!(sl.command_outputs.is_empty());
+        assert_eq!(sl.session_name, "kept");
+        assert!(sl.active());
+        assert!(sl.has_command_segments());
+        assert_eq!(app.statusline_interval, std::time::Duration::from_secs(1));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

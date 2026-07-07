@@ -2447,6 +2447,19 @@ fn is_trailing_token_wrapper(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Replace cached status-line command output with a fresh batch.
+    pub fn apply_statusline_outputs(
+        &mut self,
+        outputs: Vec<crate::app::state::StatusSegmentOutput>,
+    ) {
+        self.statusline.command_outputs.clear();
+        for output in outputs {
+            self.statusline
+                .command_outputs
+                .insert((output.side, output.index), output.text);
+        }
+    }
+
     pub fn apply_workspace_git_statuses(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -2710,6 +2723,10 @@ impl AppState {
             } => {
                 let _ = results;
                 let _ = cache_updates;
+                Vec::new()
+            }
+            AppEvent::StatusLineRefreshed { outputs } => {
+                self.apply_statusline_outputs(outputs);
                 Vec::new()
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),

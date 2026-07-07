@@ -146,6 +146,10 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// Status-line command segments finished running.
+    StatusLineRefreshed {
+        outputs: Vec<crate::app::state::StatusSegmentOutput>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

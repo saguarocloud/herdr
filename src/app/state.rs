@@ -567,6 +567,32 @@ impl Palette {
         }
         self
     }
+
+    /// Look up a palette color by its field name (trimmed, lowercased), e.g.
+    /// for user-facing color specs like status-line `fg`/`bg`. Palette tokens
+    /// deliberately shadow same-named ANSI colors (`red`, `green`, ...) so a
+    /// themed surface stays themed; raw ANSI needs an explicit hex spec.
+    pub fn color_token(&self, name: &str) -> Option<Color> {
+        match name.trim().to_lowercase().as_str() {
+            "accent" => Some(self.accent),
+            "panel_bg" => Some(self.panel_bg),
+            "surface0" => Some(self.surface0),
+            "surface1" => Some(self.surface1),
+            "surface_dim" => Some(self.surface_dim),
+            "overlay0" => Some(self.overlay0),
+            "overlay1" => Some(self.overlay1),
+            "text" => Some(self.text),
+            "subtext0" => Some(self.subtext0),
+            "mauve" => Some(self.mauve),
+            "green" => Some(self.green),
+            "yellow" => Some(self.yellow),
+            "red" => Some(self.red),
+            "blue" => Some(self.blue),
+            "teal" => Some(self.teal),
+            "peach" => Some(self.peach),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,6 +600,35 @@ pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
     pub indented: bool,
+}
+
+/// Clickable rect for one workspace entry in the status-line workspace list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusWorkspaceHit {
+    pub ws_idx: usize,
+    pub rect: Rect,
+}
+
+/// Clickable regions on the status line, derived per-frame in `compute_view`
+/// alongside the other `ViewState` hit areas.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StatuslineHitAreas {
+    /// The menu-button widget, `Rect::default()` when absent.
+    pub menu_button: Rect,
+    /// One entry per visible workspace chip, in display order.
+    pub workspace_entries: Vec<StatusWorkspaceHit>,
+    /// True when a `workspaces` widget is configured (gates wheel-cycling).
+    pub has_workspaces_widget: bool,
+}
+
+/// Which UI element the global menu is currently anchored to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlobalMenuAnchor {
+    /// The sidebar footer launcher button (the original anchor).
+    #[default]
+    Launcher,
+    /// The status-line menu widget.
+    Statusline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,9 +782,61 @@ pub enum ViewLayout {
     Mobile,
 }
 
+/// Which side of the status line a segment belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatusSide {
+    Left,
+    Right,
+}
+
+/// Captured stdout of one command segment, produced off the render path.
+#[derive(Debug, Clone)]
+pub struct StatusSegmentOutput {
+    pub side: StatusSide,
+    pub index: usize,
+    pub text: String,
+}
+
+/// Status-line data projected from config, plus cached command output. Pure
+/// data — the runtime refreshes `command_outputs`; `render` only reads it.
+#[derive(Debug, Clone, Default)]
+pub struct StatusLineRuntime {
+    pub enabled: bool,
+    pub position: crate::config::StatusLinePosition,
+    /// Animated color effects (blocked pulse, spinner shimmer, gradients).
+    pub effects: bool,
+    pub left: Vec<crate::config::StatusSegment>,
+    pub right: Vec<crate::config::StatusSegment>,
+    /// Session name for the `#{session}` token, resolved once at startup.
+    pub session_name: String,
+    /// Latest stdout of command segments, keyed by side and segment index.
+    pub command_outputs: std::collections::HashMap<(StatusSide, usize), String>,
+}
+
+impl StatusLineRuntime {
+    /// True when the bar should occupy a frame row.
+    pub fn active(&self) -> bool {
+        self.enabled && (!self.left.is_empty() || !self.right.is_empty())
+    }
+
+    /// True when any segment runs a shell command and therefore needs periodic
+    /// background refresh.
+    pub fn has_command_segments(&self) -> bool {
+        use crate::config::StatusSegment;
+        self.left
+            .iter()
+            .chain(self.right.iter())
+            .any(|seg| matches!(seg, StatusSegment::Command { .. }))
+    }
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
+    /// Full-width status-line row, empty when the status line is disabled.
+    pub statusline_rect: Rect,
+    /// Clickable regions on the status line (menu button, workspace chips).
+    pub statusline_hits: StatuslineHitAreas,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1419,6 +1526,8 @@ pub struct AppState {
     pub sound: SoundConfig,
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
+    /// tmux-style status line: projected config and cached command output.
+    pub statusline: StatusLineRuntime,
     pub keybinds: Keybinds,
     /// Frame counter for spinner animations (wraps around).
     pub spinner_tick: u32,
@@ -1452,6 +1561,9 @@ pub struct AppState {
     pub(crate) plugin_commands_in_flight: usize,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
+    /// Which UI element the open global menu is anchored to. Set on every
+    /// open; only read while `mode == Mode::GlobalMenu`.
+    pub global_menu_anchor: GlobalMenuAnchor,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
@@ -1699,6 +1811,8 @@ impl AppState {
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                statusline_rect: Rect::default(),
+                statusline_hits: StatuslineHitAreas::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -1770,6 +1884,7 @@ impl AppState {
             },
             local_sound_playback: false,
             toast_config: ToastConfig::default(),
+            statusline: StatusLineRuntime::default(),
             keybinds: Keybinds::default(),
             spinner_tick: 0,
             palette: Palette::catppuccin(),
@@ -1801,6 +1916,7 @@ impl AppState {
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
+            global_menu_anchor: GlobalMenuAnchor::default(),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),

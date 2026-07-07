@@ -20,11 +20,12 @@ pub use self::{
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
         ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
-        SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        SidebarCollapsedModeConfig, StatusLineConfig, StatusLinePosition, StatusSegment,
+        StatusStyle, StatusWidget, ToastClipboardPosition, ToastConfig, ToastDelivery,
         ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sound::SoundConfig,
-    theme::{parse_color, CustomThemeColors, ThemeConfig},
+    theme::{parse_color, parse_color_opt, CustomThemeColors, ThemeConfig},
 };
 
 pub(crate) use self::io::upsert_top_level_bool;

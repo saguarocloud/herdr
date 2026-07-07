@@ -108,6 +108,14 @@ impl App {
             return;
         }
 
+        if let AppEvent::StatusLineRefreshed { outputs } = ev {
+            self.statusline_refresh_in_flight = false;
+            self.state.apply_statusline_outputs(outputs);
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
+            return;
+        }
+
         if let AppEvent::PluginCommandFinished {
             log_id,
             finished_unix_ms,

@@ -209,7 +209,6 @@ impl AppState {
 
     pub(crate) fn global_menu_rect(&self) -> Rect {
         let screen = self.screen_rect();
-        let launcher = self.global_launcher_rect();
         let labels = self.global_menu_labels();
         let content_width = labels
             .iter()
@@ -227,6 +226,25 @@ impl AppState {
         let menu_w = content_width.saturating_add(2).min(screen.width.max(1));
         let menu_h = (labels.len() as u16 + 2).min(screen.height.max(1));
         let max_x = screen.x + screen.width.saturating_sub(menu_w);
+
+        // Anchored to the status-line menu button when opened from the bar;
+        // falls back to the launcher if the widget vanished while the menu was
+        // open (e.g. hot-reloaded out of the config).
+        if self.global_menu_anchor == crate::app::state::GlobalMenuAnchor::Statusline {
+            let button = self.view.statusline_hits.menu_button;
+            if button.width > 0 {
+                let x = button.x.min(max_x);
+                let y = match self.statusline.position {
+                    crate::config::StatusLinePosition::Top => {
+                        (button.y + 1).min(screen.y + screen.height.saturating_sub(menu_h))
+                    }
+                    crate::config::StatusLinePosition::Bottom => button.y.saturating_sub(menu_h),
+                };
+                return Rect::new(x, y, menu_w, menu_h);
+            }
+        }
+
+        let launcher = self.global_launcher_rect();
         let desired_x = launcher.x + launcher.width.saturating_sub(menu_w);
         let x = desired_x.min(max_x);
         let y = launcher.y.saturating_sub(menu_h);

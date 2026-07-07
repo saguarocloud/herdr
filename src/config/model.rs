@@ -815,6 +815,169 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Optional tmux-style status line with built-in tokens and scriptable segments.
+    pub statusline: StatusLineConfig,
+}
+
+/// Where the status line sits in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusLinePosition {
+    Top,
+    #[default]
+    Bottom,
+}
+
+/// Visual emphasis applied to a status segment, resolved against the active palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusStyle {
+    #[default]
+    Normal,
+    Accent,
+    Dim,
+    Bold,
+    /// Per-character foreground fade from the accent (or the segment `fg`
+    /// override) toward the theme mauve. Falls back to a solid accent on
+    /// themes without RGB colors.
+    Gradient,
+}
+
+/// A built-in interactive/visual status-line widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusWidget {
+    /// Clickable button that opens the global menu (same menu as the sidebar
+    /// launcher). Hidden when mouse support is off.
+    Menu,
+    /// Clickable numbered workspace list; the active workspace is highlighted
+    /// and each entry carries its aggregate agent state.
+    Workspaces,
+    /// Compact agent rollup: blocked/working/done/idle glyph counts.
+    Agents,
+    /// Current key-mode chip (` PREFIX `, ` COPY `, ` RESIZE `, ` NAV `),
+    /// each on its own theme color. Hidden outside those modes.
+    Mode,
+}
+
+/// One status-line segment: plain text, styled text, a built-in widget, or a
+/// shell command whose stdout is captured on the refresh interval. Text
+/// segments may contain `#{...}` built-in tokens that are substituted at
+/// render time.
+///
+/// Untagged: the TOML shape disambiguates — a bare string is `Text`, and a
+/// table resolves by its distinguishing key (`widget`, `text`, or `command`).
+/// `Widget` is declared before `Styled` so a malformed table carrying both
+/// `widget` and `text` resolves to `Widget`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum StatusSegment {
+    /// A bare string, e.g. `"#{workspace}:#{tab} "`.
+    Text(String),
+    /// A built-in widget, e.g. `{ widget = "workspaces" }`.
+    Widget { widget: StatusWidget },
+    /// A styled string, e.g. `{ text = "#{time:%H:%M}", style = "dim", fg = "mauve" }`.
+    Styled {
+        text: String,
+        #[serde(default)]
+        style: StatusStyle,
+        /// Optional foreground override: a palette token (`accent`, `mauve`,
+        /// ...) or any `parse_color` form (`#rrggbb`, `rgb(r,g,b)`, names).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fg: Option<String>,
+        /// Optional background override; same forms as `fg`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+    },
+    /// A shell command run every `interval`; its trimmed first line is shown.
+    Command {
+        command: Vec<String>,
+        #[serde(default)]
+        style: StatusStyle,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fg: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+    },
+}
+
+impl StatusSegment {
+    pub fn style(&self) -> StatusStyle {
+        match self {
+            StatusSegment::Text(_) | StatusSegment::Widget { .. } => StatusStyle::Normal,
+            StatusSegment::Styled { style, .. } | StatusSegment::Command { style, .. } => *style,
+        }
+    }
+
+    /// The optional fg/bg color override specs, if this segment kind has them.
+    pub fn color_overrides(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            StatusSegment::Text(_) | StatusSegment::Widget { .. } => (None, None),
+            StatusSegment::Styled { fg, bg, .. } | StatusSegment::Command { fg, bg, .. } => {
+                (fg.as_deref(), bg.as_deref())
+            }
+        }
+    }
+}
+
+/// tmux-style status line configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StatusLineConfig {
+    /// Draw the status line. Default: false.
+    pub enabled: bool,
+    /// Top or bottom of the frame. Default: bottom.
+    pub position: StatusLinePosition,
+    /// Refresh cadence for command segments and the clock, e.g. `"2s"`, `"500ms"`,
+    /// `"1m"`. Default: `"2s"`.
+    pub interval: String,
+    /// Animated color effects (blocked pulse, spinner shimmer, active-chip
+    /// gradient, attention-badge pulse). Purely cosmetic; glyph widths never
+    /// change. Default: true.
+    pub effects: bool,
+    /// Left-aligned segments.
+    pub left: Vec<StatusSegment>,
+    /// Right-aligned segments.
+    pub right: Vec<StatusSegment>,
+}
+
+impl Default for StatusLineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: StatusLinePosition::Bottom,
+            interval: "2s".into(),
+            effects: true,
+            left: Vec::new(),
+            right: Vec::new(),
+        }
+    }
+}
+
+impl StatusLineConfig {
+    /// Parse `interval` into a duration, clamped to a sane floor. Falls back to
+    /// 2s when the value cannot be parsed so a typo never disables refresh.
+    pub fn interval_duration(&self) -> std::time::Duration {
+        parse_short_duration(&self.interval).unwrap_or(std::time::Duration::from_secs(2))
+    }
+}
+
+/// Parse a short human duration such as `"500ms"`, `"2s"`, or `"1m"`.
+fn parse_short_duration(raw: &str) -> Option<std::time::Duration> {
+    let s = raw.trim();
+    let (value, unit_ms) = if let Some(rest) = s.strip_suffix("ms") {
+        (rest, 1u64)
+    } else if let Some(rest) = s.strip_suffix('s') {
+        (rest, 1000)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 60_000)
+    } else {
+        (s, 1000)
+    };
+    let amount: u64 = value.trim().parse().ok()?;
+    let millis = amount.checked_mul(unit_ms)?;
+    // Floor at 250ms to keep command segments from hammering the machine.
+    Some(std::time::Duration::from_millis(millis.max(250)))
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1003,6 +1166,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            statusline: StatusLineConfig::default(),
         }
     }
 }
@@ -1095,6 +1259,199 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusline_config_defaults_are_disabled() {
+        let config = Config::default();
+        assert!(!config.ui.statusline.enabled);
+        assert_eq!(config.ui.statusline.position, StatusLinePosition::Bottom);
+        assert_eq!(
+            config.ui.statusline.interval_duration(),
+            std::time::Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn statusline_config_parses_all_segment_forms() {
+        let toml = r##"
+[ui.statusline]
+enabled = true
+position = "top"
+interval = "500ms"
+left = ["#{session}", { text = "#{time:%H:%M}", style = "dim" }]
+right = [{ command = ["git", "branch", "--show-current"], style = "accent" }]
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let sl = &config.ui.statusline;
+        assert!(sl.enabled);
+        assert_eq!(sl.position, StatusLinePosition::Top);
+        assert_eq!(
+            sl.interval_duration(),
+            std::time::Duration::from_millis(500)
+        );
+
+        assert_eq!(sl.left.len(), 2);
+        assert!(matches!(&sl.left[0], StatusSegment::Text(t) if t == "#{session}"));
+        assert!(matches!(
+            &sl.left[1],
+            StatusSegment::Styled {
+                style: StatusStyle::Dim,
+                ..
+            }
+        ));
+
+        assert_eq!(sl.right.len(), 1);
+        match &sl.right[0] {
+            StatusSegment::Command {
+                command, style, fg, ..
+            } => {
+                assert_eq!(command, &["git", "branch", "--show-current"]);
+                assert_eq!(*style, StatusStyle::Accent);
+                assert!(fg.is_none());
+            }
+            other => panic!("expected command segment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn statusline_config_parses_widget_segments() {
+        let toml = r##"
+[ui.statusline]
+enabled = true
+left = [{ widget = "menu" }, { widget = "workspaces" }]
+right = [{ widget = "agents" }]
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let sl = &config.ui.statusline;
+        assert_eq!(
+            sl.left,
+            vec![
+                StatusSegment::Widget {
+                    widget: StatusWidget::Menu
+                },
+                StatusSegment::Widget {
+                    widget: StatusWidget::Workspaces
+                },
+            ]
+        );
+        assert_eq!(
+            sl.right,
+            vec![StatusSegment::Widget {
+                widget: StatusWidget::Agents
+            }]
+        );
+        assert_eq!(sl.left[0].style(), StatusStyle::Normal);
+        assert_eq!(sl.left[0].color_overrides(), (None, None));
+    }
+
+    #[test]
+    fn statusline_config_parses_mode_widget_and_gradient_style() {
+        let toml = r##"
+[ui.statusline]
+left = [{ widget = "mode" }, { text = "#{session}", style = "gradient" }]
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let sl = &config.ui.statusline;
+        assert_eq!(
+            sl.left[0],
+            StatusSegment::Widget {
+                widget: StatusWidget::Mode
+            }
+        );
+        assert_eq!(sl.left[1].style(), StatusStyle::Gradient);
+    }
+
+    #[test]
+    fn statusline_effects_default_on_and_parse_off() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.ui.statusline.effects, "effects default to on");
+
+        let toml = r##"
+[ui.statusline]
+effects = false
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.statusline.effects);
+    }
+
+    #[test]
+    fn statusline_config_rejects_unknown_widget() {
+        let toml = r##"
+[ui.statusline]
+left = [{ widget = "bogus" }]
+"##;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn statusline_widget_wins_over_text_when_both_present() {
+        // Declaration-order pin: untagged resolution tries Widget before
+        // Styled, so a malformed table with both keys resolves to Widget.
+        let toml = r##"
+[ui.statusline]
+left = [{ widget = "menu", text = "x" }]
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.statusline.left,
+            vec![StatusSegment::Widget {
+                widget: StatusWidget::Menu
+            }]
+        );
+    }
+
+    #[test]
+    fn statusline_config_parses_fg_bg_overrides() {
+        let toml = r##"
+[ui.statusline]
+left = [
+  { text = "#{mode}", style = "bold", fg = "mauve", bg = "#123456" },
+  { command = ["sh", "-c", "true"], fg = "rgb(1,2,3)" },
+]
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let sl = &config.ui.statusline;
+        match &sl.left[0] {
+            StatusSegment::Styled { style, fg, bg, .. } => {
+                assert_eq!(*style, StatusStyle::Bold);
+                assert_eq!(fg.as_deref(), Some("mauve"));
+                assert_eq!(bg.as_deref(), Some("#123456"));
+            }
+            other => panic!("expected styled segment, got {other:?}"),
+        }
+        assert_eq!(
+            sl.left[1].color_overrides(),
+            (Some("rgb(1,2,3)"), None),
+            "command fg parses, bg defaults to None"
+        );
+    }
+
+    #[test]
+    fn statusline_segment_roundtrip_omits_none_colors() {
+        let config = StatusLineConfig {
+            left: vec![StatusSegment::Styled {
+                text: "#{session}".into(),
+                style: StatusStyle::Accent,
+                fg: None,
+                bg: None,
+            }],
+            ..StatusLineConfig::default()
+        };
+        let serialized = toml::to_string(&config).expect("statusline config serializes");
+        assert!(!serialized.contains("fg"), "serialized: {serialized}");
+        assert!(!serialized.contains("bg"), "serialized: {serialized}");
+        let parsed: StatusLineConfig = toml::from_str(&serialized).expect("roundtrip parses");
+        assert_eq!(parsed.left, config.left);
+    }
+
+    #[test]
+    fn statusline_interval_falls_back_on_garbage() {
+        let sl = StatusLineConfig {
+            interval: "nonsense".into(),
+            ..StatusLineConfig::default()
+        };
+        assert_eq!(sl.interval_duration(), std::time::Duration::from_secs(2));
+    }
 
     #[test]
     fn update_config_defaults_and_parses() {

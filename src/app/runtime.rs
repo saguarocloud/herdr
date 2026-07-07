@@ -267,6 +267,8 @@ impl App {
 
         self.start_git_status_refresh_if_due(now);
 
+        changed |= self.tick_statusline(now);
+
         if self
             .next_auto_update_check
             .is_some_and(|deadline| now >= deadline)
@@ -358,6 +360,22 @@ impl App {
             .workspaces
             .iter()
             .any(|ws| ws.has_working_pane(&self.state.terminals))
+            || self.statusline_has_animation()
+    }
+
+    /// Status-line effects animate without any working pane: the blocked
+    /// glyph and the menu attention badge pulse. Keep the tick alive while
+    /// one of those is visible so the pulse doesn't freeze mid-swing.
+    fn statusline_has_animation(&self) -> bool {
+        let statusline = &self.state.statusline;
+        statusline.active()
+            && statusline.effects
+            && (self.state.global_menu_attention_badge_visible()
+                || self
+                    .state
+                    .terminals
+                    .values()
+                    .any(|terminal| terminal.state == crate::detect::AgentState::Blocked))
     }
 
     pub(crate) fn tick_selection_autoscroll(&mut self, now: Instant) {
@@ -521,6 +539,68 @@ impl App {
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 
+    /// Refresh the status line when its interval elapses. Command segments run on
+    /// a detached thread and report back via `AppEvent::StatusLineRefreshed`;
+    /// built-in tokens (clock, agent counts) are resolved during render, so this
+    /// returns `true` on every tick to request a repaint.
+    pub(crate) fn tick_statusline(&mut self, now: Instant) -> bool {
+        if !self.state.statusline.active() {
+            return false;
+        }
+        if now < self.last_statusline_refresh + self.statusline_interval {
+            return false;
+        }
+        self.last_statusline_refresh = now;
+
+        if self.state.statusline.has_command_segments() && !self.statusline_refresh_in_flight {
+            let jobs = self.statusline_command_jobs();
+            if !jobs.is_empty() {
+                self.statusline_refresh_in_flight = true;
+                let event_tx = self.event_tx.clone();
+                let cwd = self
+                    .state
+                    .active
+                    .and_then(|i| self.state.workspaces.get(i))
+                    .and_then(|ws| ws.resolved_identity_cwd());
+                std::thread::spawn(move || {
+                    let outputs = run_statusline_commands(jobs, cwd);
+                    let _ = event_tx.blocking_send(AppEvent::StatusLineRefreshed { outputs });
+                });
+            }
+        }
+        true
+    }
+
+    pub(crate) fn statusline_refresh_deadline(&self) -> Option<Instant> {
+        self.state
+            .statusline
+            .active()
+            .then_some(self.last_statusline_refresh + self.statusline_interval)
+    }
+
+    fn statusline_command_jobs(&self) -> Vec<StatuslineCommandJob> {
+        use crate::app::state::StatusSide;
+        use crate::config::StatusSegment;
+        let mut jobs = Vec::new();
+        for (side, segments) in [
+            (StatusSide::Left, &self.state.statusline.left),
+            (StatusSide::Right, &self.state.statusline.right),
+        ] {
+            for (index, segment) in segments.iter().enumerate() {
+                if let StatusSegment::Command { command, .. } = segment {
+                    if !command.is_empty() {
+                        jobs.push(StatuslineCommandJob {
+                            side,
+                            index,
+                            command: command.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        jobs
+    }
+
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
         self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
@@ -559,6 +639,7 @@ impl App {
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
+            self.statusline_refresh_deadline(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
@@ -614,6 +695,46 @@ impl App {
         }
         had_event
     }
+}
+
+struct StatuslineCommandJob {
+    side: crate::app::state::StatusSide,
+    index: usize,
+    command: Vec<String>,
+}
+
+/// Run each status-line command segment and capture its trimmed first line of
+/// stdout. Runs on a detached thread; failures and non-zero exits yield an
+/// empty string rather than surfacing an error into the bar.
+fn run_statusline_commands(
+    jobs: Vec<StatuslineCommandJob>,
+    cwd: Option<std::path::PathBuf>,
+) -> Vec<crate::app::state::StatusSegmentOutput> {
+    jobs.into_iter()
+        .map(|job| {
+            let mut command = std::process::Command::new(&job.command[0]);
+            command
+                .args(&job.command[1..])
+                .stdin(std::process::Stdio::null());
+            if let Some(dir) = &cwd {
+                command.current_dir(dir);
+            }
+            let text = match command.output() {
+                Ok(output) => String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                Err(_) => String::new(),
+            };
+            crate::app::state::StatusSegmentOutput {
+                side: job.side,
+                index: job.index,
+                text,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn deduplicate_git_refresh_items(
@@ -679,6 +800,32 @@ mod tests {
     use crate::app::state;
     use crate::workspace::Workspace;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_statusline_commands_captures_first_stdout_line() {
+        let jobs = vec![
+            StatuslineCommandJob {
+                side: crate::app::state::StatusSide::Left,
+                index: 0,
+                command: vec!["printf".into(), "hello\\nworld".into()],
+            },
+            StatuslineCommandJob {
+                side: crate::app::state::StatusSide::Right,
+                index: 2,
+                command: vec!["sh".into(), "-c".into(), "exit 1".into()],
+            },
+        ];
+        let outputs = run_statusline_commands(jobs, None);
+        assert_eq!(outputs.len(), 2);
+        // First line only, trimmed.
+        assert_eq!(outputs[0].side, crate::app::state::StatusSide::Left);
+        assert_eq!(outputs[0].index, 0);
+        assert_eq!(outputs[0].text, "hello");
+        // Non-zero exit with no stdout yields an empty segment, not an error.
+        assert_eq!(outputs[1].index, 2);
+        assert_eq!(outputs[1].text, "");
+    }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(

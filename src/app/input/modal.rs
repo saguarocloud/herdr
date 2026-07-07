@@ -94,7 +94,14 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
     actions
 }
 
-pub(super) fn open_global_menu(state: &mut AppState) {
+/// Open the global menu anchored to a specific UI element (sidebar launcher or
+/// status-line menu button). `global_menu_rect()` reads the anchor, so hover,
+/// item clicks, close-on-outside, and rendering all follow it.
+pub(super) fn open_global_menu_with_anchor(
+    state: &mut AppState,
+    anchor: crate::app::state::GlobalMenuAnchor,
+) {
+    state.global_menu_anchor = anchor;
     state.global_menu = MenuListState::new(0);
     state.mode = Mode::GlobalMenu;
 }
