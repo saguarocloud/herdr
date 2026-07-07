@@ -359,7 +359,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 #   mode        key-mode chip (PREFIX/COPY/RESIZE/NAV), each inverted onto its
 #               own theme color; hidden outside those modes.
 # Per-segment style presets: normal | accent | dim | bold | gradient (per-
-# character accent→mauve fade; the fg override replaces the start color).
+# character accent→mauve→peach fade; the fg override replaces the start color).
 # Text and command segments also accept optional fg/bg color overrides: a
 # theme palette token
 #   accent panel_bg surface0 surface1 surface_dim overlay0 overlay1 text
