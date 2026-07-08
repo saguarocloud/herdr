@@ -93,13 +93,17 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   file to maintain. Tests: `python3 -m unittest scripts.test_fork_release_notes`
   (run by the release workflow, not `just test`, to avoid editing the
   upstream justfile).
-- **Version scheme:** fork builds are stamped `<base>-<sha7>` (for example
-  `0.7.3-f2634a6`) by passing the short commit SHA as `HERDR_BUILD_COMMIT` at
-  build time; `src/build_info.rs::version()` appends it for stable-channel
-  builds. Upstream stable releases never set the variable and upstream preview
-  builds use the preview channel branch, so upstream version strings are
-  unchanged.
-- **Tag scheme:** release tags are `fork-v<base>-<sha7>`, deliberately *not*
+- **Version scheme:** fork builds are stamped `<base>-<N>+<sha7>` (for example
+  `0.7.3-15+f2634a6`). `N` is the build number — the count of master commits
+  since the `version =` line in `Cargo.toml` last changed, i.e. since the
+  upstream release commit entered fork history — so fork versions order within
+  a base version (`0.7.3-15 < 0.7.3-16`) and reset when upstream releases. The
+  short SHA is traceability-only build metadata. The workflow passes `N` as
+  `HERDR_BUILD_ID` and the SHA as `HERDR_BUILD_COMMIT`;
+  `src/build_info.rs::version()` combines them for stable-channel builds.
+  Upstream stable releases set neither variable and upstream preview builds use
+  the preview channel branch, so upstream version strings are unchanged.
+- **Tag scheme:** release tags are `fork-v<base>-<N>`, deliberately *not*
   `v*` — upstream's `release.yml` triggers on `v*` tags and must never fire on
   the fork.
 - **Self-update is blocked in fork builds.** A fork release binary still shows

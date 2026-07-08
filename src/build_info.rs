@@ -20,12 +20,15 @@ pub fn version() -> String {
 
 fn version_for(channel: &str, build_id: Option<&str>, build_commit: Option<&str>) -> String {
     match channel {
-        // A stable-channel build stamped with a commit is a fork build; the
-        // suffix distinguishes it from the upstream release of the same base
-        // version.
-        "stable" => match build_commit {
-            Some(commit) => format!("{BASE_VERSION}-{commit}"),
-            None => BASE_VERSION.to_string(),
+        // A stable-channel build stamped with a build number and/or commit is
+        // a fork build; the suffix distinguishes it from the upstream release
+        // of the same base version. The build number orders fork builds within
+        // a base version; the commit is traceability-only build metadata.
+        "stable" => match (build_id, build_commit) {
+            (Some(id), Some(commit)) => format!("{BASE_VERSION}-{id}+{commit}"),
+            (Some(id), None) => format!("{BASE_VERSION}-{id}"),
+            (None, Some(commit)) => format!("{BASE_VERSION}-{commit}"),
+            (None, None) => BASE_VERSION.to_string(),
         },
         channel => match build_id {
             Some(build_id) => format!("{BASE_VERSION}-{channel}.{build_id}"),
@@ -68,6 +71,22 @@ mod tests {
         assert_eq!(
             version_for("stable", None, Some("f2634a6")),
             format!("{BASE_VERSION}-f2634a6")
+        );
+    }
+
+    #[test]
+    fn stable_version_with_build_number_and_commit_orders_then_traces() {
+        assert_eq!(
+            version_for("stable", Some("15"), Some("f2634a6")),
+            format!("{BASE_VERSION}-15+f2634a6")
+        );
+    }
+
+    #[test]
+    fn stable_version_with_build_number_only_appends_number() {
+        assert_eq!(
+            version_for("stable", Some("15"), None),
+            format!("{BASE_VERSION}-15")
         );
     }
 
