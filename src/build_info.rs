@@ -10,10 +10,24 @@ pub fn build_id() -> Option<&'static str> {
     non_empty(option_env!("HERDR_BUILD_ID"))
 }
 
+pub fn build_commit() -> Option<&'static str> {
+    non_empty(option_env!("HERDR_BUILD_COMMIT"))
+}
+
 pub fn version() -> String {
-    match channel() {
-        "stable" => BASE_VERSION.to_string(),
-        channel => match build_id() {
+    version_for(channel(), build_id(), build_commit())
+}
+
+fn version_for(channel: &str, build_id: Option<&str>, build_commit: Option<&str>) -> String {
+    match channel {
+        // A stable-channel build stamped with a commit is a fork build; the
+        // suffix distinguishes it from the upstream release of the same base
+        // version.
+        "stable" => match build_commit {
+            Some(commit) => format!("{BASE_VERSION}-{commit}"),
+            None => BASE_VERSION.to_string(),
+        },
+        channel => match build_id {
             Some(build_id) => format!("{BASE_VERSION}-{channel}.{build_id}"),
             None => format!("{BASE_VERSION}-{channel}"),
         },
@@ -37,8 +51,39 @@ fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::{version_for, BASE_VERSION};
+
     #[test]
     fn stable_version_defaults_to_cargo_version() {
         assert!(!super::version().is_empty());
+    }
+
+    #[test]
+    fn stable_version_without_commit_is_base_version() {
+        assert_eq!(version_for("stable", None, None), BASE_VERSION);
+    }
+
+    #[test]
+    fn stable_version_with_commit_appends_short_sha() {
+        assert_eq!(
+            version_for("stable", None, Some("f2634a6")),
+            format!("{BASE_VERSION}-f2634a6")
+        );
+    }
+
+    #[test]
+    fn preview_version_ignores_build_commit() {
+        assert_eq!(
+            version_for("preview", Some("2026-07-07-abcdef123456"), Some("abcdef1")),
+            format!("{BASE_VERSION}-preview.2026-07-07-abcdef123456")
+        );
+    }
+
+    #[test]
+    fn non_stable_channel_without_build_id_appends_channel() {
+        assert_eq!(
+            version_for("preview", None, None),
+            format!("{BASE_VERSION}-preview")
+        );
     }
 }
