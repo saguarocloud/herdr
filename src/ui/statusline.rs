@@ -42,9 +42,13 @@ const PULSE_PERIOD: u32 = 72;
 const SHIMMER_PERIOD: u32 = 150;
 /// How far the blocked pulse dims toward the bar surface at its low point.
 const PULSE_DEPTH: f32 = 0.65;
-/// How far the active-chip background drifts from accent toward mauve at its
-/// right edge.
-const CHIP_GRADIENT_DEPTH: f32 = 0.55;
+/// Shared ramp for the static gradient chrome (gradient text segments and the
+/// active-chip background): `start` through theme mauve to theme peach. Three
+/// stops with full travel so the fade reads clearly even between adjacent
+/// pastel accents; all palette tokens, so themes restyle it wholesale.
+fn gradient_ramp(start: Color, p: &Palette) -> [Color; 3] {
+    [start, p.mauve, p.peach]
+}
 
 /// Attention pulse for a glyph in `base`: on RGB themes the color breathes
 /// toward darkness (a smooth 60fps fade); on ANSI-indexed themes it blinks
@@ -385,13 +389,13 @@ fn workspace_chip(
     item_from_spans(StatusItemKind::Workspace { ws_idx }, spans)
 }
 
-/// Sweep the active chip's background from the accent toward a mauve blend,
-/// left to right, so the chip reads as a polished pill instead of a flat
-/// block. Per-character recolor only — total width is untouched, so hit rects
-/// stay valid. No-op on themes without RGB colors.
+/// Sweep the active chip's background across the gradient ramp (accent through
+/// mauve to peach), left to right, so the chip reads as a polished pill instead
+/// of a flat block. Per-character recolor only — total width is untouched, so
+/// hit rects stay valid. No-op on themes without RGB colors.
 fn active_chip_gradient(spans: Vec<Span<'static>>, p: &Palette) -> Vec<Span<'static>> {
-    let end = effects::lerp_color(p.accent, p.mauve, CHIP_GRADIENT_DEPTH);
-    if !effects::is_rgb(p.accent) || !effects::is_rgb(end) {
+    let ramp = gradient_ramp(p.accent, p);
+    if ramp.iter().any(|stop| !effects::is_rgb(*stop)) {
         return spans;
     }
     let total: u16 = spans
@@ -410,7 +414,7 @@ fn active_chip_gradient(spans: Vec<Span<'static>>, p: &Palette) -> Vec<Span<'sta
             let t = f32::from(x) / denom;
             out.push(Span::styled(
                 c.to_string(),
-                style.bg(effects::lerp_color(p.accent, end, t)),
+                style.bg(effects::lerp_stops(&ramp, t)),
             ));
             x = x.saturating_add(display_width_u16(&c.to_string()));
         }
@@ -589,8 +593,9 @@ fn segment_style(style: StatusStyle, palette: &Palette) -> Style {
 }
 
 /// Spans for a `style = "gradient"` segment: a per-character fade from the
-/// segment's `fg` override (or the theme accent) toward the theme mauve. The
-/// resolved base style keeps any `bg` override and modifiers.
+/// segment's `fg` override (or the theme accent) through the theme mauve to
+/// the theme peach. The resolved base style keeps any `bg` override and
+/// modifiers.
 fn gradient_segment_spans(
     segment: &StatusSegment,
     text: &str,
@@ -602,7 +607,7 @@ fn gradient_segment_spans(
         .0
         .and_then(|spec| resolve_status_color(spec, palette))
         .unwrap_or(palette.accent);
-    effects::gradient_spans(text, from, palette.mauve, base)
+    effects::gradient_spans(text, &gradient_ramp(from, palette), base)
 }
 
 /// Resolve a user color spec: palette tokens win over ANSI color names so a
@@ -1306,29 +1311,30 @@ mod tests {
             fancy.hits.workspace_entries[0].rect
         );
 
-        // Left edge anchors on the accent; the right edge has drifted.
+        // Left edge anchors on the accent; the right edge lands on peach.
         let first = fancy.left[0].spans.first().expect("chip has spans");
         let last = fancy.left[0].spans.last().expect("chip has spans");
         assert_eq!(first.style.bg, Some(app.palette.accent));
-        assert_ne!(last.style.bg, Some(app.palette.accent));
+        assert_eq!(last.style.bg, Some(app.palette.peach));
     }
 
     #[test]
-    fn gradient_style_fades_text_toward_mauve() {
+    fn gradient_style_fades_text_across_the_ramp() {
         let mut app = AppState::test_new();
         app.statusline.enabled = true;
         app.statusline.left = vec![StatusSegment::Styled {
-            text: "grad".into(),
+            text: "grads".into(),
             style: StatusStyle::Gradient,
             fg: None,
             bg: None,
         }];
         let content = build_statusline_content(&app, test_area(80));
-        assert_eq!(flat_text(&content.left), "grad");
+        assert_eq!(flat_text(&content.left), "grads");
         let spans = &content.left[0].spans;
-        assert_eq!(spans.len(), 4, "one span per character");
+        assert_eq!(spans.len(), 5, "one span per character");
         assert_eq!(spans[0].style.fg, Some(app.palette.accent));
-        assert_eq!(spans[3].style.fg, Some(app.palette.mauve));
+        assert_eq!(spans[2].style.fg, Some(app.palette.mauve));
+        assert_eq!(spans[4].style.fg, Some(app.palette.peach));
     }
 
     #[test]
