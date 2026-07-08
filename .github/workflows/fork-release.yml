@@ -1,0 +1,288 @@
+name: Fork Release
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "website/**"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      base_version: ${{ steps.plan.outputs.base_version }}
+      short_sha: ${{ steps.plan.outputs.short_sha }}
+      build_number: ${{ steps.plan.outputs.build_number }}
+      version: ${{ steps.plan.outputs.version }}
+      release_name: ${{ steps.plan.outputs.release_name }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute fork version
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          # Build number: commits since the version line last changed, i.e.
+          # since the upstream release commit entered fork history. Monotonic
+          # within a base version, resets when upstream bumps the version.
+          bump_commit="$(git blame -l -L '/^version = /,+1' -s Cargo.toml | awk '{print $1}')"
+          build_number="$(git rev-list --count "${bump_commit}..HEAD")"
+          version="$base_version-$build_number+$short_sha"
+          release_name="$base_version-$build_number"
+          tag="fork-v$release_name"
+          {
+            echo "base_version=$base_version"
+            echo "short_sha=$short_sha"
+            echo "build_number=$build_number"
+            echo "version=$version"
+            echo "release_name=$release_name"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install Rust tools
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: just,cargo-nextest
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - name: Run checks
+        run: just check
+
+      - name: Run fork script tests
+        run: python3 -m unittest scripts.test_fork_release_notes
+
+  build:
+    needs: preflight
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: 'true'
+      HERDR_BUILD_ID: ${{ needs.preflight.outputs.build_number }}
+      HERDR_BUILD_COMMIT: ${{ needs.preflight.outputs.short_sha }}
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: runner.os != 'macOS'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Restore Homebrew Zig cache
+        if: runner.os == 'macOS'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            homebrew-zig-0.15-${{ runner.os }}-
+
+      - name: Install patched Zig on macOS
+        if: runner.os == 'macOS'
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix zig@0.15)/bin/zig" version
+
+      - name: Prefer official Ubuntu mirrors over Azure
+        if: runner.os == 'Linux'
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+            echo "Using apt mirrors:"
+            cat /etc/apt/apt-mirrors.txt
+          fi
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo find /etc/apt/sources.list.d -type f \( -iname '*microsoft*' -o -iname '*azure-cli*' \) -print -delete
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
+
+      - name: Set Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: fork-release-${{ matrix.target }}
+
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            ldd ${{ matrix.name }} > LDD_INFO.txt 2>&1 || true
+            grep -Eq "statically linked|not a dynamic executable" LDD_INFO.txt
+          fi
+          python3 - <<'PY' | tee ${{ matrix.name }}.sha256
+          import hashlib, pathlib
+          path = pathlib.Path('${{ matrix.name }}')
+          print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+          PY
+
+      - name: Smoke check stamped version
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(./${{ matrix.name }} --version)"
+          expected="herdr ${{ needs.preflight.outputs.version }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "error: expected '$expected', got '$actual'" >&2
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}
+            ${{ matrix.name }}.sha256
+
+  release:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_tag="$(git describe --first-parent --tags --match 'fork-v*' --abbrev=0 HEAD^ 2>/dev/null || true)"
+          python3 scripts/fork_release_notes.py \
+            --previous "$previous_tag" \
+            --commit "$GITHUB_SHA" \
+            --version '${{ needs.preflight.outputs.version }}' \
+            --base-version '${{ needs.preflight.outputs.base_version }}' \
+            --repo "$GITHUB_REPOSITORY" \
+            --output FORK_NOTES.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          body_path: FORK_NOTES.md
+          make_latest: 'true'
+          files: |
+            herdr-linux-x86_64/herdr-linux-x86_64
+            herdr-linux-x86_64/herdr-linux-x86_64.sha256
+            herdr-linux-aarch64/herdr-linux-aarch64
+            herdr-linux-aarch64/herdr-linux-aarch64.sha256
+            herdr-macos-x86_64/herdr-macos-x86_64
+            herdr-macos-x86_64/herdr-macos-x86_64.sha256
+            herdr-macos-aarch64/herdr-macos-aarch64
+            herdr-macos-aarch64/herdr-macos-aarch64.sha256
+
+      - name: Prune old fork releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt > fork-releases.json
+          python3 - <<'PY' > old-fork-tags.txt
+          import json
+          with open("fork-releases.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+          releases = [
+              release for release in data
+              if str(release.get("tagName", "")).startswith("fork-v")
+          ]
+          releases.sort(key=lambda release: str(release.get("createdAt", "")), reverse=True)
+          for release in releases[15:]:
+              print(release["tagName"])
+          PY
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done < old-fork-tags.txt
