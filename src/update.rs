@@ -31,6 +31,7 @@ const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
 const SOURCE_UPDATE_COMMAND: &str = "sync the source checkout and rebuild";
+const FORK_UPDATE_COMMAND: &str = "install the latest fork release";
 const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
@@ -1725,7 +1726,9 @@ fn print_running_session_update_outcomes(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update_install_command() -> &'static str {
-    if is_source_build_install() {
+    if is_fork_build_install() {
+        FORK_UPDATE_COMMAND
+    } else if is_source_build_install() {
         SOURCE_UPDATE_COMMAND
     } else if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
@@ -1742,6 +1745,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
     match install_command {
         SOURCE_UPDATE_COMMAND => {
             "source build: sync the checkout with upstream, rebuild, then restart this Herdr session".to_string()
+        }
+        FORK_UPDATE_COMMAND => {
+            "fork build: sync the fork with upstream, then install the latest fork release from github.com/saguarocloud/herdr/releases".to_string()
         }
         HERDR_UPDATE_COMMAND => {
             "detach, run `herdr update`, then follow its restart guidance".to_string()
@@ -1790,6 +1796,12 @@ fn is_source_build_install() -> bool {
     };
 
     is_cargo_target_exe_path_following_links(&current_exe)
+}
+
+// Fork release builds stamp a commit into an otherwise stable-channel binary
+// at compile time, so detection is env-based rather than exe-path-based.
+fn is_fork_build_install() -> bool {
+    crate::build_info::channel() == "stable" && crate::build_info::build_commit().is_some()
 }
 
 pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
@@ -2028,6 +2040,12 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         }
         return Err(
             "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr".into(),
+        );
+    }
+
+    if is_fork_build_install() {
+        return Err(
+            "self-update is disabled for fork builds; installing an upstream release binary would replace the fork build. Install the latest fork release instead".into(),
         );
     }
 
@@ -2525,6 +2543,14 @@ mod tests {
 
         assert!(instruction.contains("sync the checkout with upstream"));
         assert!(instruction.contains("rebuild"));
+    }
+
+    #[test]
+    fn fork_build_instruction_points_at_fork_releases() {
+        let instruction = update_install_instruction(FORK_UPDATE_COMMAND);
+
+        assert!(instruction.contains("fork build"));
+        assert!(instruction.contains("saguarocloud/herdr/releases"));
     }
 
     #[test]
