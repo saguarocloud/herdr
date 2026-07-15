@@ -150,16 +150,50 @@ animated effects` (2026-07-07). Replaces a decade-old custom tmux setup. Built
 as core frame chrome rather than a plugin because herdr plugins cannot draw
 native non-terminal UI.
 
-- **Config:** `[ui.statusline]` in `config.toml` with `enabled`, `position`
-  (top/bottom), `interval`, `effects`, and `left`/`right` segment arrays.
-  Segments are bare strings, `{ text, style, fg, bg }`,
-  `{ command = [...], style }`, or widgets
-  (`{ widget = "menu" | "workspaces" | "agents" | "mode" }`). Styles:
-  normal/accent/dim/bold/gradient. Built-in tokens include
-  `#{session|workspace|tab|mode|agents_*|time|time:%FMT}`. Hot-reloads via
-  `herdr server reload-config`. These `ui.statusline.*` keys are also registered
-  in the config-reference JSONs (see "Syncs can add consistency checks" above);
-  keep them in sync when the config shape changes.
+**Config guide (`config.toml`).** The bar is off by default; enable it under
+`[ui.statusline]`. `herdr --default-config` prints a live annotated block; the
+reference below is the authoritative fork copy. After editing, reload without a
+restart via `herdr server reload-config`.
+
+```toml
+[ui.statusline]
+enabled  = true        # draw the bar (default: false)
+position = "bottom"    # "bottom" (default) or "top"
+interval = "2s"        # refresh cadence for command segments and #{time} (e.g. "500ms", "1m")
+effects  = true        # animated color effects (default: true; see below)
+
+# Left- and right-aligned segment arrays. When the bar is too narrow the right
+# side wins and left workspace entries truncate (active workspace stays visible).
+left = [
+  { widget = "mode" },                              # PREFIX/COPY/RESIZE/NAV chip
+  { widget = "menu" },                              # clickable ☰ menu
+  { text = " #{session} ", style = "gradient" },    # styled text with a token
+  { widget = "workspaces" },                        # numbered workspace chips
+]
+right = [
+  { command = ["sh", "-c", "git branch --show-current"], style = "accent" },
+  " ",                                              # bare string segment
+  { widget = "agents" },                            # blocked/working/done/idle rollup
+  { text = " #{time:%H:%M} ", style = "dim" },      # clock
+]
+```
+
+- **Segment forms:** a bare string (`"#{workspace} "`, may embed tokens); a
+  styled table `{ text, style, fg, bg }`; a command table
+  `{ command = ["prog", "args"...], style, fg, bg }` (run every `interval` in the
+  active workspace dir, first stdout line shown); or a widget table
+  `{ widget = "menu" | "workspaces" | "agents" | "mode" }`.
+- **Styles** (`style =`): `normal`, `accent`, `dim`, `bold`, `gradient`.
+  Optional `fg`/`bg` accept palette tokens (`accent`, `mauve`, …), `#rrggbb`,
+  `rgb(r,g,b)`, or color names.
+- **Tokens** (in any text/string segment, substituted per refresh):
+  `#{session}`, `#{workspace}`, `#{tab}`, `#{pane_index}`, `#{pane_count}`,
+  `#{mode}`, `#{agents_blocked|agents_working|agents_done|agents_idle|agents_total}`,
+  `#{time}` (→ `%H:%M`), and `#{time:%FMT}` for any strftime format. An
+  unrecognized `#{name}` renders literally.
+- **Registered in the config-reference JSONs** (see "Syncs can add consistency
+  checks" above): the `ui.statusline.*` keys must stay listed in both
+  `config-reference.json` files, so update them when the config shape changes.
 - **Widgets:** clickable ☰ menu button, numbered workspace chips (click to
   focus, wheel to cycle, spinner while working, ◉ when blocked), themed agent
   rollup, and a mode chip (PREFIX/COPY/RESIZE/NAV).
