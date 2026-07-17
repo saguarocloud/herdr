@@ -6,6 +6,10 @@ on:
       - master
     paths-ignore:
       - "website/**"
+  # Manual dry-run: dispatch on any branch to run preflight + the cross-compile
+  # build matrix without publishing (the release job is gated to master below).
+  # Use this to validate release-build changes on a branch before merging.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -227,6 +231,9 @@ jobs:
 
   release:
     needs: [preflight, build]
+    # Only publish from master. A workflow_dispatch dry-run on a branch still
+    # runs preflight + build (validating the matrix) but skips publishing.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
