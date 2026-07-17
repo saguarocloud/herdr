@@ -54,6 +54,16 @@ Notes:
   process without killing them, which matters because dev sessions usually run
   *inside* herdr. `~/bin/herdr` symlinks to `target/release/herdr`, so both the
   server and TUI pick up the new build on handoff.
+- **Hand off to a release build, never a debug one.** `app_dir_name()` in
+  `src/config/io.rs` keys the config/data/socket namespace off
+  `cfg!(debug_assertions)`: release builds use `herdr`, debug builds
+  (`cargo build`) use `herdr-dev`. Handing the live session off with
+  `--import-exe target/debug/herdr` binds the `herdr-dev` sockets and reads an
+  empty `herdr-dev` config, so your statusline and settings vanish and the
+  original client is orphaned. Always test in-place with `target/release/herdr`
+  (`server live-handoff --import-exe <abs path to release binary>`). To undo a
+  bad handoff, hand back off to the previous binary — protocol version is
+  unchanged across a sync, so the existing client reconnects cleanly.
 
 ## Local build and test quirks (this machine)
 
@@ -118,6 +128,18 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   `approve-contributor`, `approve-merged-contributor`,
   `label-next-release-issues`, `release`, `preview`, and `nix`. Re-check this
   list after upstream syncs add new workflows.
+- **Syncs can add consistency checks that fork-only surface must satisfy.**
+  A sync's Rust build/tests can pass while a *new* maintenance check fails on
+  fork-only code. v0.7.4 added `scripts/config_reference_check.py`, which fails
+  unless every `src/config` field is documented in **both**
+  `docs/next/website/src/data/config-reference.json` and
+  `website/src/data/config-reference.json` (kept byte-identical;
+  `just release-docs-check` diffs them). It surfaces in the Fork Release
+  `preflight / Run checks` job (`just check`), not in `ci.yml`. Whenever the
+  fork adds a config field, register it in both reference files; after a sync,
+  run `just check` (or the maintenance-script tests) and document any fork-only
+  surface the new check names. The `conventional-commits` job skips merge
+  commits (`git log --no-merges`), so sync merge subjects no longer fail it.
 
 ## Fork-only features
 
@@ -128,14 +150,50 @@ animated effects` (2026-07-07). Replaces a decade-old custom tmux setup. Built
 as core frame chrome rather than a plugin because herdr plugins cannot draw
 native non-terminal UI.
 
-- **Config:** `[ui.statusline]` in `config.toml` with `enabled`, `position`
-  (top/bottom), `interval`, `effects`, and `left`/`right` segment arrays.
-  Segments are bare strings, `{ text, style, fg, bg }`,
-  `{ command = [...], style }`, or widgets
-  (`{ widget = "menu" | "workspaces" | "agents" | "mode" }`). Styles:
-  normal/accent/dim/bold/gradient. Built-in tokens include
-  `#{session|workspace|tab|mode|agents_*|time|time:%FMT}`. Hot-reloads via
-  `herdr server reload-config`.
+**Config guide (`config.toml`).** The bar is off by default; enable it under
+`[ui.statusline]`. `herdr --default-config` prints a live annotated block; the
+reference below is the authoritative fork copy. After editing, reload without a
+restart via `herdr server reload-config`.
+
+```toml
+[ui.statusline]
+enabled  = true        # draw the bar (default: false)
+position = "bottom"    # "bottom" (default) or "top"
+interval = "2s"        # refresh cadence for command segments and #{time} (e.g. "500ms", "1m")
+effects  = true        # animated color effects (default: true; see below)
+
+# Left- and right-aligned segment arrays. When the bar is too narrow the right
+# side wins and left workspace entries truncate (active workspace stays visible).
+left = [
+  { widget = "mode" },                              # PREFIX/COPY/RESIZE/NAV chip
+  { widget = "menu" },                              # clickable ☰ menu
+  { text = " #{session} ", style = "gradient" },    # styled text with a token
+  { widget = "workspaces" },                        # numbered workspace chips
+]
+right = [
+  { command = ["sh", "-c", "git branch --show-current"], style = "accent" },
+  " ",                                              # bare string segment
+  { widget = "agents" },                            # blocked/working/done/idle rollup
+  { text = " #{time:%H:%M} ", style = "dim" },      # clock
+]
+```
+
+- **Segment forms:** a bare string (`"#{workspace} "`, may embed tokens); a
+  styled table `{ text, style, fg, bg }`; a command table
+  `{ command = ["prog", "args"...], style, fg, bg }` (run every `interval` in the
+  active workspace dir, first stdout line shown); or a widget table
+  `{ widget = "menu" | "workspaces" | "agents" | "mode" }`.
+- **Styles** (`style =`): `normal`, `accent`, `dim`, `bold`, `gradient`.
+  Optional `fg`/`bg` accept palette tokens (`accent`, `mauve`, …), `#rrggbb`,
+  `rgb(r,g,b)`, or color names.
+- **Tokens** (in any text/string segment, substituted per refresh):
+  `#{session}`, `#{workspace}`, `#{tab}`, `#{pane_index}`, `#{pane_count}`,
+  `#{mode}`, `#{agents_blocked|agents_working|agents_done|agents_idle|agents_total}`,
+  `#{time}` (→ `%H:%M`), and `#{time:%FMT}` for any strftime format. An
+  unrecognized `#{name}` renders literally.
+- **Registered in the config-reference JSONs** (see "Syncs can add consistency
+  checks" above): the `ui.statusline.*` keys must stay listed in both
+  `config-reference.json` files, so update them when the config shape changes.
 - **Widgets:** clickable ☰ menu button, numbered workspace chips (click to
   focus, wheel to cycle, spinner while working, ◉ when blocked), themed agent
   rollup, and a mode chip (PREFIX/COPY/RESIZE/NAV).
@@ -167,3 +225,9 @@ native non-terminal UI.
   merge-based from here on.)
 - **2026-07-07:** adopted the PR workflow — fork-specific changes land on
   master via pull request; upstream syncs merge directly to master.
+- **2026-07-15:** synced to upstream `v0.7.4` (105 commits, merge `89fb23b`).
+  One additive conflict in `src/app/runtime.rs` (both sides added a `tests`
+  fn — kept both). The sync's new `config_reference_check` and the
+  merge-commit-strict `conventional-commits` check turned Fork Release and CI
+  red; fixed in PR #5 (document `ui.statusline.*` in the config reference;
+  `--no-merges` in the commit validator).
