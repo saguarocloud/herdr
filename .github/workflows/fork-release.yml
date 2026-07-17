@@ -12,6 +12,10 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Match the pinned toolchain in rust-toolchain.toml so cross-compile targets
+  # are added to the toolchain the build actually uses (upstream release.yml
+  # does the same). Keep in sync with rust-toolchain.toml on upstream syncs.
+  RUST_TOOLCHAIN_VERSION: 1.96.1
 
 concurrency:
   group: fork-release
@@ -61,6 +65,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
 
       - name: Install Rust tools
         uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
@@ -124,6 +130,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: ${{ matrix.target }}
 
       - name: Install Zig

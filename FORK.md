@@ -140,6 +140,16 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   run `just check` (or the maintenance-script tests) and document any fork-only
   surface the new check names. The `conventional-commits` job skips merge
   commits (`git log --no-merges`), so sync merge subjects no longer fail it.
+- **Cross-compile builds follow `rust-toolchain.toml`.** v0.7.4 added
+  `rust-toolchain.toml` (pins `1.96.1`), so `cargo build --target <cross>` uses
+  that toolchain, not `stable`. The fork-release build job must `rustup target
+  add` onto the *pinned* toolchain — `dtolnay/rust-toolchain` with
+  `toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}` — or cross targets fail with
+  `E0463: can't find crate for core`. Native (macOS-aarch64) builds hide this
+  because the host target is always present, and `ci.yml` builds native only, so
+  the failure appears only in Fork Release's cross builds. Keep
+  `RUST_TOOLCHAIN_VERSION` in `fork-release.yml` matched to
+  `rust-toolchain.toml` after upstream toolchain bumps.
 
 ## Fork-only features
 
