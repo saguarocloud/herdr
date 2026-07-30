@@ -3,10 +3,14 @@
 //! widgets (menu button, clickable workspace list, agent rollup).
 //!
 //! Rendering is pure: [`build_statusline_content`] derives everything from
-//! `&AppState`. It is called from BOTH `compute_view` (to store hit rects in
-//! `ViewState.statusline_hits`) and [`render_statusline`] (to draw) within the
-//! same frame, so hit geometry and pixels can never diverge — do not let the
-//! two callers drift apart. Command segments read their cached output
+//! `&AppState` plus the terminal runtime registry (needed for live pane cwds,
+//! which back auto-derived workspace names). It is called from BOTH
+//! `compute_view` (to store hit rects in `ViewState.statusline_hits`) and
+//! [`render_statusline`] (to draw) within the same frame, so hit geometry and
+//! pixels can never diverge — do not let the two callers drift apart. Both
+//! callers must pass the SAME registry. Space names come from [`space_labels`],
+//! which mirrors the sidebar rather than deriving its own — see that function
+//! before changing how a chip is named. Command segments read their cached output
 //! (produced off the render path by the runtime refresh loop). See
 //! `[ui.statusline]` config and `App::tick_statusline`.
 
@@ -25,6 +29,7 @@ use crate::{
     },
     config::{StatusSegment, StatusStyle, StatusWidget},
     detect::AgentState,
+    terminal::TerminalRuntimeRegistry,
 };
 
 use super::effects;
@@ -122,7 +127,12 @@ pub(super) struct StatusLineContent {
     pub hits: StatuslineHitAreas,
 }
 
-pub(super) fn render_statusline(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(super) fn render_statusline(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -134,7 +144,7 @@ pub(super) fn render_statusline(app: &AppState, frame: &mut Frame, area: Rect) {
         area,
     );
 
-    let content = build_statusline_content(app, area);
+    let content = build_statusline_content(app, terminal_runtimes, area);
     if !content.left.is_empty() && content.left_area.width > 0 {
         let spans: Vec<Span<'static>> = content
             .left
@@ -160,24 +170,32 @@ pub(super) fn render_statusline(app: &AppState, frame: &mut Frame, area: Rect) {
 /// survive); the left side gets the remaining budget minus a 1-cell gap, with
 /// the workspace chip run reflowed to fit — the active chip is always emitted,
 /// truncating its name before other placed chips are dropped.
-pub(super) fn build_statusline_content(app: &AppState, area: Rect) -> StatusLineContent {
+pub(super) fn build_statusline_content(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+) -> StatusLineContent {
     let mut hits = StatuslineHitAreas::default();
     if area.width == 0 || area.height == 0 {
         // No bar, no hits, no widget flags: bar behavior is fully off.
         return StatusLineContent::default();
     }
 
-    let mut right = build_side_items(app, StatusSide::Right, &mut hits);
+    // Resolved once per frame: each label costs a per-pane cwd lookup plus a
+    // grouping pass, and every chip/token below reads the same answer.
+    let labels = space_labels(app, terminal_runtimes);
+
+    let mut right = build_side_items(app, &labels, StatusSide::Right, &mut hits);
     while right.len() > 1 && item_total_width(&right) > area.width {
         right.remove(0);
     }
     let right_total = item_total_width(&right).min(area.width);
 
-    let mut left = build_side_items(app, StatusSide::Left, &mut hits);
+    let mut left = build_side_items(app, &labels, StatusSide::Left, &mut hits);
     let gap = if right_total > 0 { 1 } else { 0 };
     let left_budget = area.width.saturating_sub(right_total + gap);
     if item_total_width(&left) > left_budget {
-        reflow_workspace_chips(app, &mut left, left_budget);
+        reflow_workspace_chips(app, &labels, &mut left, left_budget);
     }
 
     let left_area = Rect::new(area.x, area.y, left_budget, 1);
@@ -192,6 +210,49 @@ pub(super) fn build_statusline_content(app: &AppState, area: Rect) -> StatusLine
         right_area,
         hits,
     }
+}
+
+/// Space names exactly as the sidebar renders them, indexed by workspace index.
+///
+/// The bar must never invent its own naming: it mirrors
+/// `render_workspace_cards` in [`super::sidebar`] (and the mobile switcher),
+/// which means the live root-pane cwd label, and for a grouped worktree child
+/// its branch instead. Grouping comes from the EXPANDED entry list on purpose —
+/// a collapsed group hides children from the sidebar but the bar still draws a
+/// chip for every space, and a chip must not change its name just because a
+/// group got folded.
+fn space_labels(app: &AppState, terminal_runtimes: &TerminalRuntimeRegistry) -> Vec<String> {
+    let mut indented = vec![false; app.workspaces.len()];
+    for entry in super::sidebar::workspace_list_entries_expanded(app) {
+        let super::sidebar::WorkspaceListEntry::Workspace {
+            ws_idx,
+            indented: is_child,
+        } = entry;
+        if let Some(slot) = indented.get_mut(ws_idx) {
+            *slot = is_child;
+        }
+    }
+
+    app.workspaces
+        .iter()
+        .zip(indented)
+        .map(|(ws, is_child)| {
+            let label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            if is_child {
+                super::sidebar::grouped_child_display_label(
+                    &label,
+                    ws.branch().as_deref(),
+                    ws.custom_name.is_some(),
+                )
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
+fn space_label_at(labels: &[String], ws_idx: usize) -> &str {
+    labels.get(ws_idx).map(String::as_str).unwrap_or_default()
 }
 
 fn item_total_width(items: &[StatusItem]) -> u16 {
@@ -214,6 +275,7 @@ fn item_from_spans(kind: StatusItemKind, spans: Vec<Span<'static>>) -> StatusIte
 /// `App::statusline_command_jobs` uses; keep them in lockstep.
 fn build_side_items(
     app: &AppState,
+    labels: &[String],
     side: StatusSide,
     hits: &mut StatuslineHitAreas,
 ) -> Vec<StatusItem> {
@@ -229,7 +291,7 @@ fn build_side_items(
                 StatusWidget::Workspaces => {
                     hits.has_workspaces_widget = true;
                     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-                        items.push(workspace_chip(app, ws_idx, ws, None));
+                        items.push(workspace_chip(app, labels, ws_idx, ws, None));
                     }
                 }
                 StatusWidget::Agents => items.extend(agents_item(app)),
@@ -245,8 +307,8 @@ fn build_side_items(
                         .get(&(side, index))
                         .cloned()
                         .unwrap_or_default(),
-                    StatusSegment::Text(raw) => resolve_tokens(app, raw),
-                    StatusSegment::Styled { text, .. } => resolve_tokens(app, text),
+                    StatusSegment::Text(raw) => resolve_tokens(app, labels, raw),
+                    StatusSegment::Styled { text, .. } => resolve_tokens(app, labels, text),
                     // Handled by the outer match arm.
                     StatusSegment::Widget { .. } => String::new(),
                 };
@@ -328,6 +390,7 @@ fn menu_item(app: &AppState) -> Option<StatusItem> {
 /// workspace is inverted onto the theme accent (tab-bar convention).
 fn workspace_chip(
     app: &AppState,
+    labels: &[String],
     ws_idx: usize,
     ws: &crate::workspace::Workspace,
     name_budget: Option<usize>,
@@ -349,7 +412,7 @@ fn workspace_chip(
         }
     };
 
-    let mut name = ws.display_name();
+    let mut name = space_label_at(labels, ws_idx).to_string();
     if let Some(budget) = name_budget {
         name = truncate_end(&name, budget.max(MIN_ACTIVE_NAME_CELLS));
     }
@@ -428,7 +491,12 @@ fn state_label_color_for(state: AgentState, seen: bool, p: &Palette) -> ratatui:
 
 /// Reflow the (contiguous) workspace chip run on the left side into whatever
 /// budget remains after the fixed items. The active chip is always emitted.
-fn reflow_workspace_chips(app: &AppState, left: &mut Vec<StatusItem>, left_budget: u16) {
+fn reflow_workspace_chips(
+    app: &AppState,
+    labels: &[String],
+    left: &mut Vec<StatusItem>,
+    left_budget: u16,
+) {
     let Some(run_start) = left
         .iter()
         .position(|item| matches!(item.kind, StatusItemKind::Workspace { .. }))
@@ -446,19 +514,19 @@ fn reflow_workspace_chips(app: &AppState, left: &mut Vec<StatusItem>, left_budge
         .map(|(_, item)| item.width)
         .fold(0u16, u16::saturating_add);
     let ws_budget = left_budget.saturating_sub(fixed);
-    let fitted = fit_workspace_chips(app, ws_budget);
+    let fitted = fit_workspace_chips(app, labels, ws_budget);
     left.splice(run_start..run_start + run_len, fitted);
 }
 
 /// Fit workspace chips into `ws_budget` cells: greedy in display order, with
 /// the active chip reserved up-front (name-truncated if necessary) so earlier
 /// chips can never starve it. A dim `…` marks dropped chips.
-fn fit_workspace_chips(app: &AppState, ws_budget: u16) -> Vec<StatusItem> {
+fn fit_workspace_chips(app: &AppState, labels: &[String], ws_budget: u16) -> Vec<StatusItem> {
     let natural: Vec<StatusItem> = app
         .workspaces
         .iter()
         .enumerate()
-        .map(|(ws_idx, ws)| workspace_chip(app, ws_idx, ws, None))
+        .map(|(ws_idx, ws)| workspace_chip(app, labels, ws_idx, ws, None))
         .collect();
     if item_total_width(&natural) <= ws_budget {
         return natural;
@@ -470,12 +538,12 @@ fn fit_workspace_chips(app: &AppState, ws_budget: u16) -> Vec<StatusItem> {
     let mut active_chip = active_idx.map(|ws_idx| {
         let ws = &app.workspaces[ws_idx];
         if natural[ws_idx].width <= remaining {
-            workspace_chip(app, ws_idx, ws, None)
+            workspace_chip(app, labels, ws_idx, ws, None)
         } else {
-            let name_width = display_width_u16(&ws.display_name());
+            let name_width = display_width_u16(space_label_at(labels, ws_idx));
             let frame_width = natural[ws_idx].width.saturating_sub(name_width);
             let name_budget = usize::from(remaining.saturating_sub(frame_width));
-            workspace_chip(app, ws_idx, ws, Some(name_budget))
+            workspace_chip(app, labels, ws_idx, ws, Some(name_budget))
         }
     });
     let mut reserve = active_chip.as_ref().map(|chip| chip.width).unwrap_or(0);
@@ -637,7 +705,7 @@ fn segment_span_style(segment: &StatusSegment, palette: &Palette) -> Style {
 
 /// Substitute every `#{token}` in `raw`. Unrecognized tokens are left verbatim
 /// (including the braces) so typos are visible rather than silently dropped.
-fn resolve_tokens(app: &AppState, raw: &str) -> String {
+fn resolve_tokens(app: &AppState, labels: &[String], raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(start) = rest.find("#{") {
@@ -645,7 +713,7 @@ fn resolve_tokens(app: &AppState, raw: &str) -> String {
         let after = &rest[start + 2..];
         match after.find('}') {
             Some(end) => {
-                out.push_str(&resolve_token(app, &after[..end]));
+                out.push_str(&resolve_token(app, labels, &after[..end]));
                 rest = &after[end + 1..];
             }
             None => {
@@ -659,10 +727,10 @@ fn resolve_tokens(app: &AppState, raw: &str) -> String {
     out
 }
 
-fn resolve_token(app: &AppState, token: &str) -> String {
+fn resolve_token(app: &AppState, labels: &[String], token: &str) -> String {
     match token {
         "session" => app.statusline.session_name.clone(),
-        "workspace" => active_workspace_label(app).unwrap_or_default(),
+        "workspace" => active_workspace_label(app, labels).unwrap_or_default(),
         "tab" => active_tab_label(app).unwrap_or_default(),
         "pane_index" => pane_index(app).map(|i| i.to_string()).unwrap_or_default(),
         "pane_count" => pane_count(app).to_string(),
@@ -683,9 +751,8 @@ fn resolve_token(app: &AppState, token: &str) -> String {
     }
 }
 
-fn active_workspace_label(app: &AppState) -> Option<String> {
-    let ws = app.active.and_then(|i| app.workspaces.get(i))?;
-    Some(ws.display_name())
+fn active_workspace_label(app: &AppState, labels: &[String]) -> Option<String> {
+    labels.get(app.active?).cloned()
 }
 
 fn active_tab_label(app: &AppState) -> Option<String> {
@@ -862,6 +929,43 @@ mod tests {
         Rect::new(0, 30, width, 1)
     }
 
+    /// Build the bar without live PTY runtimes. Workspace names then resolve
+    /// from `AppState::terminals` — the cwd the runtime loop keeps fresh — which
+    /// is exactly what these tests want to assert on.
+    fn build_content(app: &AppState, area: Rect) -> StatusLineContent {
+        build_statusline_content(app, &TerminalRuntimeRegistry::new(), area)
+    }
+
+    fn resolve(app: &AppState, raw: &str) -> String {
+        let labels = space_labels(app, &TerminalRuntimeRegistry::new());
+        resolve_tokens(app, &labels, raw)
+    }
+
+    /// The space name the sidebar draws for `ws_idx`, derived independently of
+    /// the bar so a test failure means the two surfaces actually disagree.
+    fn sidebar_label(app: &AppState, ws_idx: usize) -> String {
+        let runtimes = TerminalRuntimeRegistry::new();
+        let indented = super::super::sidebar::workspace_list_entries_expanded(app)
+            .into_iter()
+            .any(
+                |super::super::sidebar::WorkspaceListEntry::Workspace {
+                     ws_idx: i,
+                     indented,
+                 }| { i == ws_idx && indented },
+            );
+        let ws = &app.workspaces[ws_idx];
+        let label = ws.display_name_from(&app.terminals, &runtimes);
+        if indented {
+            super::super::sidebar::grouped_child_display_label(
+                &label,
+                ws.branch().as_deref(),
+                ws.custom_name.is_some(),
+            )
+        } else {
+            label
+        }
+    }
+
     /// Push a workspace whose root pane's terminal runs a detected agent in
     /// `state` with `seen` (the agent panel only lists panes with an agent).
     fn push_workspace(app: &mut AppState, name: &str, state: AgentState, seen: bool) {
@@ -893,16 +997,16 @@ mod tests {
     fn resolve_tokens_substitutes_session_and_leaves_unknown() {
         let mut app = AppState::test_new();
         app.statusline.session_name = "work".into();
-        assert_eq!(resolve_tokens(&app, "#{session}"), "work");
-        assert_eq!(resolve_tokens(&app, "[#{session}]"), "[work]");
-        assert_eq!(resolve_tokens(&app, "#{bogus}"), "#{bogus}");
+        assert_eq!(resolve(&app, "#{session}"), "work");
+        assert_eq!(resolve(&app, "[#{session}]"), "[work]");
+        assert_eq!(resolve(&app, "#{bogus}"), "#{bogus}");
     }
 
     #[test]
     fn resolve_tokens_handles_unterminated_and_plain_text() {
         let app = AppState::test_new();
-        assert_eq!(resolve_tokens(&app, "plain text"), "plain text");
-        assert_eq!(resolve_tokens(&app, "a #{unterminated"), "a #{unterminated");
+        assert_eq!(resolve(&app, "plain text"), "plain text");
+        assert_eq!(resolve(&app, "a #{unterminated"), "a #{unterminated");
     }
 
     #[test]
@@ -1025,11 +1129,178 @@ mod tests {
             .command_outputs
             .insert((StatusSide::Left, 3), "second-cmd".into());
 
-        let content = build_statusline_content(&app, test_area(120));
+        let content = build_content(&app, test_area(120));
         let text = flat_text(&content.left);
         assert!(text.contains("first-cmd"), "text: {text}");
         assert!(text.contains("mid"), "text: {text}");
         assert!(text.contains("second-cmd"), "text: {text}");
+    }
+
+    /// `identity_cwd` is frozen at workspace creation, so an auto-named space
+    /// whose pane has since `cd`-ed must be labelled from the live pane cwd —
+    /// the same source the sidebar and navigator read. Covers both the chip
+    /// widget and the `#{workspace}` token.
+    #[test]
+    fn workspace_label_tracks_live_pane_cwd_not_frozen_identity_cwd() {
+        let mut app = AppState::test_new();
+        app.statusline.enabled = true;
+        app.statusline.left = vec![
+            StatusSegment::Widget {
+                widget: StatusWidget::Workspaces,
+            },
+            StatusSegment::Text(" #{workspace}".into()),
+        ];
+
+        let mut ws = Workspace::test_new("ignored");
+        // Auto-named: no custom name, so the label derives from cwd.
+        ws.custom_name = None;
+        ws.identity_cwd = "/projects/stale".into();
+        let root = ws.tabs[0].root_pane;
+        let terminal_id = ws
+            .terminal_id(root)
+            .expect("test workspace root pane has a terminal")
+            .clone();
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("root pane terminal exists")
+            .cwd = "/projects/live".into();
+        app.active = Some(0);
+
+        let content = build_content(&app, test_area(80));
+        let text = flat_text(&content.left);
+        assert!(text.contains("1:live"), "chip text: {text}");
+        assert!(
+            !text.contains("stale"),
+            "stale identity_cwd leaked into the bar: {text}"
+        );
+        let labels = space_labels(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(
+            active_workspace_label(&app, &labels).as_deref(),
+            Some("live")
+        );
+        assert_eq!(labels[0], sidebar_label(&app, 0));
+    }
+
+    /// A grouped worktree child is named after its BRANCH in the sidebar, not
+    /// its checkout directory. The bar must show the same thing — this is the
+    /// case that diverged most visibly, since worktree spaces are usually
+    /// auto-named and their branch changes under them.
+    #[test]
+    fn grouped_worktree_child_chip_matches_sidebar_branch_label() {
+        let mut app = AppState::test_new();
+        app.statusline.enabled = true;
+        app.statusline.left = vec![StatusSegment::Widget {
+            widget: StatusWidget::Workspaces,
+        }];
+
+        let mut parent = Workspace::test_new("parent");
+        parent.custom_name = None;
+        parent.identity_cwd = "/repo/herdr".into();
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+
+        let mut child = Workspace::test_new("child");
+        child.custom_name = None;
+        child.identity_cwd = "/repo/herdr-wt".into();
+        child.cached_git_branch = Some("worktree/fix-statusline".into());
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-wt".into(),
+            is_linked_worktree: true,
+        });
+
+        app.workspaces = vec![parent, child];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let labels = space_labels(&app, &TerminalRuntimeRegistry::new());
+        // Branch wins for the child, with the `worktree/` prefix stripped.
+        assert_eq!(labels[1], "fix-statusline");
+        // ...and that is exactly what the sidebar draws.
+        assert_eq!(labels[0], sidebar_label(&app, 0));
+        assert_eq!(labels[1], sidebar_label(&app, 1));
+
+        let text = flat_text(&build_content(&app, test_area(80)).left);
+        assert!(text.contains("2:fix-statusline"), "chip text: {text}");
+    }
+
+    /// Collapsing a group hides children from the sidebar but the bar still
+    /// draws every chip; a chip must not rename itself when a group folds.
+    #[test]
+    fn collapsed_group_does_not_change_child_chip_label() {
+        let mut app = AppState::test_new();
+        app.statusline.enabled = true;
+        app.statusline.left = vec![StatusSegment::Widget {
+            widget: StatusWidget::Workspaces,
+        }];
+
+        let mut parent = Workspace::test_new("parent");
+        parent.custom_name = None;
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        let mut child = Workspace::test_new("child");
+        child.custom_name = None;
+        child.cached_git_branch = Some("feature-x".into());
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-wt".into(),
+            is_linked_worktree: true,
+        });
+        app.workspaces = vec![parent, child];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+
+        let expanded = space_labels(&app, &TerminalRuntimeRegistry::new());
+        app.collapsed_space_keys.insert("repo-key".into());
+        let collapsed = space_labels(&app, &TerminalRuntimeRegistry::new());
+
+        assert_eq!(expanded, collapsed);
+        assert_eq!(collapsed[1], "feature-x");
+    }
+
+    /// An explicit rename still wins over the live cwd on both surfaces.
+    #[test]
+    fn workspace_label_prefers_custom_name_over_live_cwd() {
+        let mut app = AppState::test_new();
+        app.statusline.enabled = true;
+        app.statusline.left = vec![StatusSegment::Widget {
+            widget: StatusWidget::Workspaces,
+        }];
+
+        let mut ws = Workspace::test_new("ignored");
+        ws.custom_name = Some("renamed".into());
+        ws.identity_cwd = "/projects/stale".into();
+        let root = ws.tabs[0].root_pane;
+        let terminal_id = ws
+            .terminal_id(root)
+            .expect("test workspace root pane has a terminal")
+            .clone();
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("root pane terminal exists")
+            .cwd = "/projects/live".into();
+        app.active = Some(0);
+
+        let text = flat_text(&build_content(&app, test_area(80)).left);
+        assert!(text.contains("1:renamed"), "chip text: {text}");
     }
 
     #[test]
@@ -1041,12 +1312,12 @@ mod tests {
         }];
 
         app.mouse_capture = false;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert!(content.left.is_empty());
         assert_eq!(content.hits.menu_button, Rect::default());
 
         app.mouse_capture = true;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(content.left.len(), 1);
         let button = content.hits.menu_button;
         assert!(button.width > 0);
@@ -1066,7 +1337,7 @@ mod tests {
         push_workspace(&mut app, "beta", AgentState::Idle, true);
         app.active = Some(0);
 
-        let content = build_statusline_content(&app, test_area(120));
+        let content = build_content(&app, test_area(120));
         assert!(content.hits.has_workspaces_widget);
         assert_eq!(content.hits.workspace_entries.len(), 2);
         assert_eq!(content.hits.workspace_entries[0].ws_idx, 0);
@@ -1098,7 +1369,7 @@ mod tests {
         push_workspace(&mut app, "block", AgentState::Blocked, true);
         push_workspace(&mut app, "fresh", AgentState::Idle, false);
 
-        let content = build_statusline_content(&app, test_area(120));
+        let content = build_content(&app, test_area(120));
         // Working workspace: animated braille spinner in theme yellow.
         assert_eq!(
             content.left[0].spans[1].content.as_ref(),
@@ -1129,7 +1400,7 @@ mod tests {
         }
         app.active = Some(4); // last workspace must survive truncation
 
-        let content = build_statusline_content(&app, test_area(30));
+        let content = build_content(&app, test_area(30));
         // Right side always fits and is right-anchored.
         assert_eq!(flat_text(&content.right), "RIGHT");
         assert_eq!(content.right_area.x + content.right_area.width, 30);
@@ -1164,7 +1435,7 @@ mod tests {
             StatusSegment::Text("dropped-first".into()),
             StatusSegment::Text("clock".into()),
         ];
-        let content = build_statusline_content(&app, test_area(10));
+        let content = build_content(&app, test_area(10));
         assert_eq!(flat_text(&content.right), "clock");
     }
 
@@ -1178,13 +1449,13 @@ mod tests {
 
         // All-unknown agents: nothing to show at all.
         push_workspace(&mut app, "mystery", AgentState::Unknown, true);
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert!(content.right.is_empty(), "unknown agents are omitted");
 
         // One working, one blocked: exactly those two buckets appear.
         push_workspace(&mut app, "busy", AgentState::Working, true);
         push_workspace(&mut app, "stuck", AgentState::Blocked, true);
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         let text = flat_text(&content.right);
         assert!(text.contains("◉ 1"), "blocked bucket: {text}");
         assert!(
@@ -1207,18 +1478,18 @@ mod tests {
 
         // Hidden outside the key modes.
         app.mode = Mode::Terminal;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert!(content.left.is_empty(), "no chip outside key modes");
 
         app.mode = Mode::Prefix;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(flat_text(&content.left), " PREFIX ");
         let style = content.left[0].spans[0].style;
         assert_eq!(style.bg, Some(app.palette.accent));
         assert!(style.add_modifier.contains(Modifier::BOLD));
 
         app.mode = Mode::Copy;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(flat_text(&content.left), " COPY ");
         assert_eq!(content.left[0].spans[0].style.bg, Some(app.palette.yellow));
     }
@@ -1235,12 +1506,12 @@ mod tests {
         // Static red without effects, and at the start of each pulse cycle.
         app.statusline.effects = false;
         app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(content.left[0].spans[1].style.fg, Some(app.palette.red));
 
         app.statusline.effects = true;
         app.spinner_tick = 0;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(
             content.left[0].spans[1].style.fg,
             Some(app.palette.red),
@@ -1249,7 +1520,7 @@ mod tests {
 
         // Mid-cycle the glyph has visibly dimmed toward black.
         app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         let pulsed = content.left[0].spans[1].style.fg;
         assert_ne!(pulsed, Some(app.palette.red));
         assert_eq!(
@@ -1275,14 +1546,14 @@ mod tests {
 
         // Indexed red can't interpolate; tick 0 is the bright half-cycle.
         app.spinner_tick = 0;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         let style = content.left[0].spans[1].style;
         assert_eq!(style.fg, Some(app.palette.red));
         assert!(!style.add_modifier.contains(Modifier::DIM));
 
         // Mid-cycle the glyph blinks to faint, color unchanged.
         app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         let style = content.left[0].spans[1].style;
         assert_eq!(style.fg, Some(app.palette.red));
         assert!(style.add_modifier.contains(Modifier::DIM));
@@ -1299,9 +1570,9 @@ mod tests {
         app.active = Some(0);
 
         app.statusline.effects = false;
-        let plain = build_statusline_content(&app, test_area(80));
+        let plain = build_content(&app, test_area(80));
         app.statusline.effects = true;
-        let fancy = build_statusline_content(&app, test_area(80));
+        let fancy = build_content(&app, test_area(80));
 
         // Same cells, same text, same hit rects — only colors moved.
         assert_eq!(plain.left[0].width, fancy.left[0].width);
@@ -1328,7 +1599,7 @@ mod tests {
             fg: None,
             bg: None,
         }];
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         assert_eq!(flat_text(&content.left), "grads");
         let spans = &content.left[0].spans;
         assert_eq!(spans.len(), 5, "one span per character");
@@ -1346,7 +1617,7 @@ mod tests {
         }];
         push_workspace(&mut app, "stuck", AgentState::Blocked, true);
 
-        let content = build_statusline_content(&app, test_area(80));
+        let content = build_content(&app, test_area(80));
         let spans = &content.right[0].spans;
         assert_eq!(spans[0].content.as_ref(), "◉");
         assert_eq!(spans[1].content.as_ref(), " 1");
@@ -1360,7 +1631,7 @@ mod tests {
         app.statusline.position = StatusLinePosition::Top;
         app.statusline.left = vec![StatusSegment::Text("x".into())];
         let area = Rect::new(0, 0, 40, 1);
-        let content = build_statusline_content(&app, area);
+        let content = build_content(&app, area);
         assert_eq!(content.left_area.y, 0);
         assert_eq!(flat_text(&content.left), "x");
     }
@@ -1370,7 +1641,7 @@ mod tests {
         let mut app = AppState::test_new();
         app.statusline.enabled = true;
         app.statusline.left = vec![StatusSegment::Text("x".into())];
-        let content = build_statusline_content(&app, Rect::default());
+        let content = build_content(&app, Rect::default());
         assert!(content.left.is_empty());
         assert_eq!(content.hits, StatuslineHitAreas::default());
     }
