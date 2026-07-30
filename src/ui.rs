@@ -327,7 +327,8 @@ fn compute_view_internal(
 
     // Same pure builder render_statusline draws from, so hit rects and pixels
     // can never diverge within a frame.
-    let statusline_hits = self::statusline::build_statusline_content(app, statusline_rect).hits;
+    let statusline_hits =
+        self::statusline::build_statusline_content(app, terminal_runtimes, statusline_rect).hits;
 
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
@@ -454,7 +455,12 @@ pub fn render_with_runtime_registry(
     }
 
     if app.view.layout != ViewLayout::Mobile && app.view.statusline_rect.height > 0 {
-        self::statusline::render_statusline(app, frame, app.view.statusline_rect);
+        self::statusline::render_statusline(
+            app,
+            terminal_runtimes,
+            frame,
+            app.view.statusline_rect,
+        );
     }
 
     // Ambient notifications sit above panes, but below interactive overlays.
