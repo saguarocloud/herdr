@@ -132,8 +132,17 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   governance and release workflows that need upstream-only secrets are disabled
   at the repo level (Actions settings, not file edits): `pr-gate`, `issue-gate`,
   `approve-contributor`, `approve-merged-contributor`,
-  `label-next-release-issues`, `release`, `preview`, and `nix`. Re-check this
-  list after upstream syncs add new workflows.
+  `label-next-release-issues`, `release`, `preview`, `nix`, and `Website`
+  (`website.yml`). Re-check this list after upstream syncs add new workflows.
+- **Why `Website` is disabled (v0.8.0).** The v0.8.0 `Website` workflow's
+  "Validate published snapshots" step (`website/scripts/docs-versions.mjs` →
+  `docs-snapshot.mjs`) runs `git ls-tree <v-tag> -- website/src/content/docs`
+  against upstream release tags like `v0.7.5`. The fork tags releases `fork-v*`,
+  **never** `v*` (so upstream's `release.yml` can't fire on it), so those tags
+  don't exist on the fork remote and the step dies with `fatal: Not a valid
+  object name v0.7.5`. Pushing `v*` tags to the fork is not an option — it would
+  trigger the very workflows the `fork-v*` scheme avoids — so the workflow is
+  disabled at the repo level instead.
 - **Syncs can add consistency checks that fork-only surface must satisfy.**
   A sync's Rust build/tests can pass while a *new* maintenance check fails on
   fork-only code. v0.7.4 added `scripts/config_reference_check.py`, which fails
