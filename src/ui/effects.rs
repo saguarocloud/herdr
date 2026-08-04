@@ -1,12 +1,13 @@
-//! Pure, width-stable color effects for animated UI chrome.
+//! Pure, width-stable color math for static status-line chrome.
 //!
-//! Every function here is a pure function of `(spinner_tick, palette)`, so
-//! callers on the render path stay deterministic and hit geometry can never
-//! change with animation — effects recolor cells, they never add or remove
-//! them. All interpolation requires true-color (`Color::Rgb`) endpoints;
-//! ANSI-indexed themes degrade to the static base color instead of animating.
-//! [`wave`] is 0 at tick 0, so every effect renders exactly its static base
-//! color on the first frame (and in tests, which pin `spinner_tick = 0`).
+//! Every function here is a pure function of `(position, palette)` — the
+//! spatial per-character gradients used by the status line. They recolor
+//! cells, they never add or remove them, so hit geometry is unaffected. All
+//! interpolation requires true-color (`Color::Rgb`) endpoints; ANSI-indexed
+//! themes degrade to the static base color. Upstream v0.8.0 removed the
+//! animation tick (`perf: replace agent spinners with static status marks`),
+//! so the fork's status line is static: no pulse/shimmer, only these
+//! position-based gradients remain.
 
 use ratatui::{
     style::{Color, Style},
@@ -34,27 +35,6 @@ pub(super) fn lerp_color(from: Color, to: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
     Color::Rgb(mix(r0, r1), mix(g0, g1), mix(b0, b1))
-}
-
-/// Smooth cosine wave over `period` ticks: 0.0 at the start of each cycle,
-/// 1.0 at the midpoint, and back. Being exactly 0 at tick 0 keeps the first
-/// frame identical to the static rendering.
-pub(super) fn wave(tick: u32, period: u32) -> f32 {
-    let period = period.max(2);
-    let phase = (tick % period) as f32 / period as f32;
-    0.5 - 0.5 * (phase * std::f32::consts::TAU).cos()
-}
-
-/// Breathe `base` toward `toward`, at most `depth` of the way there.
-pub(super) fn pulse_color(tick: u32, period: u32, base: Color, toward: Color, depth: f32) -> Color {
-    lerp_color(base, toward, wave(tick, period) * depth.clamp(0.0, 1.0))
-}
-
-/// Breathe `base` toward darkness. Unlike a pulse toward a surface color this
-/// only needs `base` itself to be RGB, so it works when the theme's surfaces
-/// are `Reset`/indexed (e.g. the `terminal` theme with custom RGB accents).
-pub(super) fn pulse_dim(tick: u32, period: u32, base: Color, depth: f32) -> Color {
-    pulse_color(tick, period, base, Color::Rgb(0, 0, 0), depth)
 }
 
 /// Piecewise-linear blend across `stops` at `t` in `[0, 1]`. With two stops
@@ -121,33 +101,6 @@ mod tests {
         assert_eq!(
             lerp_color(Color::Rgb(10, 10, 10), Color::Reset, 0.5),
             Color::Rgb(10, 10, 10)
-        );
-    }
-
-    #[test]
-    fn wave_is_zero_at_cycle_start_and_peaks_mid_cycle() {
-        assert_eq!(wave(0, 60), 0.0);
-        assert_eq!(wave(60, 60), 0.0, "wraps back to the base color");
-        assert!((wave(30, 60) - 1.0).abs() < 1e-5);
-        assert!(wave(15, 60) > 0.4 && wave(15, 60) < 0.6);
-    }
-
-    #[test]
-    fn pulse_color_is_base_at_tick_zero() {
-        let base = Color::Rgb(200, 40, 40);
-        let toward = Color::Rgb(20, 20, 30);
-        assert_eq!(pulse_color(0, 72, base, toward, 0.65), base);
-        assert_ne!(pulse_color(36, 72, base, toward, 0.65), base);
-    }
-
-    #[test]
-    fn pulse_depth_limits_the_swing() {
-        let base = Color::Rgb(100, 100, 100);
-        let toward = Color::Rgb(0, 0, 0);
-        // Peak of the wave at half depth lands halfway.
-        assert_eq!(
-            pulse_color(36, 72, base, toward, 0.5),
-            Color::Rgb(50, 50, 50)
         );
     }
 

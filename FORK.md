@@ -73,14 +73,20 @@ Notes:
   which pins Zig 0.15.2 against the older MacOSX15.4 SDK from CommandLineTools.
 - **Use nextest, not `cargo test`.** Plain `cargo test` is flaky here from
   in-process env races.
-- **5 known-environmental test failures.** These live PTY integration tests fail
+- **6 known-environmental test failures.** These live PTY integration tests fail
   on this machine on every commit, including pristine upstream — likely because
   tests run inside a live herdr session. Exclude them when validating:
   `cross_area_agent_process_survives_detach_and_reattach`,
   `cross_area_two_clients_shared_view_and_single_detach_stability`,
   `events_subscribe_streams_output_and_agent_status_events`,
   `live_server_holds_one_pty_master_fd_per_pane`,
-  `multi_client_broadcasts_frame_updates_to_all_clients`.
+  `multi_client_broadcasts_frame_updates_to_all_clients`,
+  `live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session` (added in the
+  v0.8.0 sync — verified failing identically on pristine `v0.8.0` with
+  `agent_not_found`, so environmental, not a fork regression). One more,
+  `inactive_owner_cancels_idle_stream_and_dispatches_close`, is a load-only
+  tokio-timing flake: it fails under full-suite concurrency but passes in
+  isolation, so it does not need excluding — just re-run it alone.
 - `just` is not installed here; run the recipe bodies from the `justfile`
   directly (routing cargo build/test steps through `.local/build-macos.sh`).
 
@@ -170,7 +176,9 @@ restart via `herdr server reload-config`.
 enabled  = true        # draw the bar (default: false)
 position = "bottom"    # "bottom" (default) or "top"
 interval = "2s"        # refresh cadence for command segments and #{time} (e.g. "500ms", "1m")
-effects  = true        # animated color effects (default: true; see below)
+effects  = true        # accepted for config compatibility but a NO-OP since the
+                       # v0.8.0 sync (the animation tick was removed upstream —
+                       # the bar is static; see below)
 
 # Left- and right-aligned segment arrays. When the bar is too narrow the right
 # side wins and left workspace entries truncate (active workspace stays visible).
@@ -205,21 +213,29 @@ right = [
   checks" above): the `ui.statusline.*` keys must stay listed in both
   `config-reference.json` files, so update them when the config shape changes.
 - **Widgets:** clickable ☰ menu button, numbered workspace chips (click to
-  focus, wheel to cycle, spinner while working, ◉ when blocked), themed agent
+  focus, wheel to cycle, ● working / ◉ blocked / ○ idle marks), themed agent
   rollup, and a mode chip (PREFIX/COPY/RESIZE/NAV).
-- **Animated effects** (`effects = true`, width-stable and recolor-only):
-  blocked-glyph breathing pulse, menu badge pulse, working-spinner shimmer,
-  gradient sweep on the active workspace chip, per-character gradient text.
-  RGB themes interpolate; ANSI-indexed themes fall back to a DIM blink or
-  static rendering. The `terminal` theme needs `[theme.custom]` RGB accent
-  overrides for smooth effects.
+- **Static rendering (since the v0.8.0 sync).** Upstream v0.8.0 removed the
+  animation tick (`81f355fa perf: replace agent spinners with static status
+  marks`), which drove the fork's animated effects. Per maintainer decision the
+  fork followed upstream and went static: the `effects` config key is now a
+  **no-op** (kept only so existing configs still parse), and the animation
+  infrastructure (`sync_animation_timer`, `spinner_tick`, `next_animation_tick`)
+  is gone. What remains is entirely static and width-stable: solid state marks
+  (no pulse/shimmer/spinner), and the **spatial** per-character gradients (active
+  workspace chip background, `style = "gradient"` text) — these were always
+  position-based, not tick-based, so they survive. If effects are ever wanted
+  back, they must repaint only the status-bar region (not full panes) to respect
+  the upstream perf change; see the AskUserQuestion decision in the v0.8.0 sync.
 - **Architecture:** one pure builder `build_statusline_content()`
   (`src/ui/statusline.rs`) feeds both `compute_view` hit-testing and rendering,
   so geometry and clicks stay in lockstep. Command segments run off the render
   path in `App::tick_statusline` and cache via `AppEvent::StatusLineRefreshed`.
-  Pure color effects live in `src/ui/effects.rs`. Mouse handling is
-  `statusline_mouse()` in `src/app/input/mouse.rs`, mode-gated so bar clicks
-  cannot hijack modals.
+  Static gradient color math lives in `src/ui/effects.rs` (spatial only — the
+  tick-driven `wave`/`pulse_*` functions were removed in the v0.8.0 sync).
+  Working-pane agent marks come from upstream's static `status::state_dot`.
+  Mouse handling is `statusline_mouse()` in `src/app/input/mouse.rs`, mode-gated
+  so bar clicks cannot hijack modals.
 - **New files:** `src/ui/statusline.rs`, `src/ui/effects.rs`. Touched upstream
   files (rebase conflict surface): `config/model.rs`, `config.rs`,
   `config/theme.rs`, `app/state.rs`, `app/mod.rs`, `app/runtime.rs`,
@@ -241,3 +257,20 @@ right = [
   merge-commit-strict `conventional-commits` check turned Fork Release and CI
   red; fixed in PR #5 (document `ui.statusline.*` in the config reference;
   `--no-merges` in the commit validator).
+- **2026-07-23:** synced to upstream `v0.7.5` (55 commits, PR #7). One additive
+  conflict in `src/ui.rs` (`mod statusline;` vs upstream's new `mod
+  tab_surface;` — kept both).
+- **2026-08-03:** synced to upstream `v0.8.0` (129 commits) — a **refactor-heavy
+  minor bump**. Conflicts in `config.rs`, `app/mod.rs`, `app/runtime.rs` (import
+  unions + additive struct fields, plus upstream moving git-refresh into the new
+  `src/app/git_refresh.rs` module and changing the event drain to return
+  `(had_event, changed)`). The big one: upstream removed the whole animation
+  system (`81f355fa`, `b01fc37e`), which the fork's animated statusline effects
+  depended on. **Decision: follow upstream — static statusline.** Ported the
+  fork's `statusline.rs`/`effects.rs` off the removed tick APIs (`spinner_tick`,
+  `spinner_frame`, `agent_icon`, the render-signal `store`→`request_generic`
+  change, and `resolved_identity_cwd`→`resolved_identity_cwd_from`), dropped the
+  tick-driven effects, kept the static spatial gradients. `effects` config key
+  is now a no-op. Note: upstream now ships the two `config-reference.json` files
+  intentionally divergent (preview vs stable), so they are no longer
+  byte-identical — `config_reference_check` (both-documented) still gates.
