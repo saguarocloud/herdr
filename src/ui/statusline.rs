@@ -39,14 +39,6 @@ use super::text::{display_width_u16, truncate_end};
 /// Minimum name cells kept when the active workspace chip must be truncated.
 const MIN_ACTIVE_NAME_CELLS: usize = 4;
 
-/// Breathing period (in ~60fps animation ticks) for attention pulses:
-/// blocked glyphs and the menu badge. ~1.2s per cycle.
-const PULSE_PERIOD: u32 = 72;
-/// Hue-drift period for the working spinner shimmer. Slower than the pulse so
-/// "working" reads as ambient motion, not an alarm. ~2.5s per cycle.
-const SHIMMER_PERIOD: u32 = 150;
-/// How far the blocked pulse dims toward the bar surface at its low point.
-const PULSE_DEPTH: f32 = 0.65;
 /// Shared ramp for the static gradient chrome (gradient text segments and the
 /// active-chip background): `start` through theme mauve to theme peach. Three
 /// stops with full travel so the fade reads clearly even between adjacent
@@ -55,48 +47,15 @@ fn gradient_ramp(start: Color, p: &Palette) -> [Color; 3] {
     [start, p.mauve, p.peach]
 }
 
-/// Attention pulse for a glyph in `base`: on RGB themes the color breathes
-/// toward darkness (a smooth 60fps fade); on ANSI-indexed themes it blinks
-/// `Modifier::DIM` in a square wave instead, so attention states animate on
-/// every theme. Identity at tick 0 and when effects are off.
-fn attention_pulse(app: &AppState, base: Color) -> Style {
-    let style = Style::default().fg(base);
-    if !app.statusline.effects {
-        return style;
-    }
-    if effects::is_rgb(base) {
-        return style.fg(effects::pulse_dim(
-            app.spinner_tick,
-            PULSE_PERIOD,
-            base,
-            PULSE_DEPTH,
-        ));
-    }
-    if effects::wave(app.spinner_tick, PULSE_PERIOD) >= 0.5 {
-        style.add_modifier(Modifier::DIM)
-    } else {
-        style
-    }
-}
-
+/// Static blocked-glyph style: theme red. Upstream v0.8.0 removed the
+/// animation tick, so attention states no longer pulse.
 fn blocked_glyph_style(app: &AppState) -> Style {
-    attention_pulse(app, app.palette.red)
+    Style::default().fg(app.palette.red)
 }
 
-/// Working glyph color: shimmers between theme yellow and peach in step with
-/// the braille spinner. Static yellow when effects are off or either endpoint
-/// is not RGB (the spinner itself still animates).
+/// Static working-glyph color: theme yellow (no shimmer without the tick).
 fn working_glyph_color(app: &AppState) -> Color {
-    if !app.statusline.effects {
-        return app.palette.yellow;
-    }
-    effects::pulse_color(
-        app.spinner_tick,
-        SHIMMER_PERIOD,
-        app.palette.yellow,
-        app.palette.peach,
-        1.0,
-    )
+    app.palette.yellow
 }
 
 /// What a rendered status item corresponds to, for hit-testing.
@@ -375,8 +334,9 @@ fn menu_item(app: &AppState) -> Option<StatusItem> {
         let badge = if open_here {
             base.add_modifier(Modifier::BOLD)
         } else {
-            // The badge exists to be noticed: pulse it on the accent.
-            attention_pulse(app, p.accent).add_modifier(Modifier::BOLD)
+            // The badge exists to be noticed: a static accent mark (upstream
+            // v0.8.0 removed the animation tick, so it no longer pulses).
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
         };
         vec![Span::styled(" ● ", badge), Span::styled("☰ ", base)]
     } else {
@@ -397,19 +357,12 @@ fn workspace_chip(
 ) -> StatusItem {
     let p = &app.palette;
     let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
-    let (glyph, state_glyph_style) = if ws.has_working_pane(&app.terminals) {
-        (
-            super::spinner_frame(app.spinner_tick),
-            Style::default().fg(working_glyph_color(app)),
-        )
-    } else {
-        match (agg_state, agg_seen) {
-            (AgentState::Blocked, _) => ("◉", blocked_glyph_style(app)),
-            (AgentState::Working, _) => ("●", Style::default().fg(working_glyph_color(app))),
-            (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
-            (AgentState::Idle, true) => ("○", Style::default().fg(p.green)),
-            (AgentState::Unknown, _) => ("·", Style::default().fg(p.overlay0)),
-        }
+    let (glyph, state_glyph_style) = match (agg_state, agg_seen) {
+        (AgentState::Blocked, _) => ("◉", blocked_glyph_style(app)),
+        (AgentState::Working, _) => ("●", Style::default().fg(working_glyph_color(app))),
+        (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
+        (AgentState::Idle, true) => ("○", Style::default().fg(p.green)),
+        (AgentState::Unknown, _) => ("·", Style::default().fg(p.overlay0)),
     };
 
     let mut name = space_label_at(labels, ws_idx).to_string();
@@ -423,11 +376,7 @@ fn workspace_chip(
         let style = Style::default()
             .fg(super::widgets::panel_contrast_fg(p))
             .bg(p.accent);
-        let name_style = if app.statusline.effects {
-            style.add_modifier(Modifier::BOLD)
-        } else {
-            style
-        };
+        let name_style = style.add_modifier(Modifier::BOLD);
         (style, style, style, name_style)
     } else {
         (
@@ -446,7 +395,7 @@ fn workspace_chip(
         Span::styled(name, name_style),
         Span::styled(" ", pad_style),
     ];
-    if active && app.statusline.effects {
+    if active {
         spans = active_chip_gradient(spans, p);
     }
     item_from_spans(StatusItemKind::Workspace { ws_idx }, spans)
@@ -598,11 +547,15 @@ fn agents_item(app: &AppState) -> Option<StatusItem> {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
-        let (glyph, mut style) = super::status::agent_icon(state, seen, app.spinner_tick, p);
-        // Attention states animate like the workspace chips; count labels take
-        // their bucket's static color so the rollup reads at a glance.
+        let (mut glyph, mut style) = super::status::state_dot(state, seen, p);
+        // Blocked/working take their bucket's static color so the rollup reads
+        // at a glance; other buckets keep the state_dot styling. The blocked
+        // ring mirrors the workspace-chip glyph.
         match key {
-            "blocked" => style = blocked_glyph_style(app),
+            "blocked" => {
+                glyph = "◉";
+                style = blocked_glyph_style(app);
+            }
             "working" => style = style.fg(working_glyph_color(app)),
             _ => {}
         }
@@ -1370,11 +1323,8 @@ mod tests {
         push_workspace(&mut app, "fresh", AgentState::Idle, false);
 
         let content = build_content(&app, test_area(120));
-        // Working workspace: animated braille spinner in theme yellow.
-        assert_eq!(
-            content.left[0].spans[1].content.as_ref(),
-            super::super::spinner_frame(app.spinner_tick)
-        );
+        // Working workspace: static ● in theme yellow.
+        assert_eq!(content.left[0].spans[1].content.as_ref(), "●");
         assert_eq!(content.left[0].spans[1].style.fg, Some(app.palette.yellow));
         // Blocked: ◉ in theme red.
         assert_eq!(content.left[1].spans[1].content.as_ref(), "◉");
@@ -1458,13 +1408,7 @@ mod tests {
         let content = build_content(&app, test_area(80));
         let text = flat_text(&content.right);
         assert!(text.contains("◉ 1"), "blocked bucket: {text}");
-        assert!(
-            text.contains(&format!(
-                "{} 1",
-                super::super::spinner_frame(app.spinner_tick)
-            )),
-            "working bucket with spinner glyph: {text}"
-        );
+        assert!(text.contains("● 1"), "working bucket static glyph: {text}");
         assert!(!text.contains('✓'), "idle bucket hidden when zero: {text}");
     }
 
@@ -1495,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_glyph_pulses_only_with_effects_enabled() {
+    fn blocked_glyph_is_static_red() {
         let mut app = AppState::test_new();
         app.statusline.enabled = true;
         app.statusline.left = vec![StatusSegment::Widget {
@@ -1503,60 +1447,14 @@ mod tests {
         }];
         push_workspace(&mut app, "stuck", AgentState::Blocked, true);
 
-        // Static red without effects, and at the start of each pulse cycle.
-        app.statusline.effects = false;
-        app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_content(&app, test_area(80));
-        assert_eq!(content.left[0].spans[1].style.fg, Some(app.palette.red));
-
-        app.statusline.effects = true;
-        app.spinner_tick = 0;
-        let content = build_content(&app, test_area(80));
-        assert_eq!(
-            content.left[0].spans[1].style.fg,
-            Some(app.palette.red),
-            "tick 0 renders the static base color"
-        );
-
-        // Mid-cycle the glyph has visibly dimmed toward black.
-        app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_content(&app, test_area(80));
-        let pulsed = content.left[0].spans[1].style.fg;
-        assert_ne!(pulsed, Some(app.palette.red));
-        assert_eq!(
-            pulsed,
-            Some(effects::lerp_color(
-                app.palette.red,
-                ratatui::style::Color::Rgb(0, 0, 0),
-                PULSE_DEPTH
-            ))
-        );
-    }
-
-    #[test]
-    fn blocked_pulse_blinks_dim_modifier_on_ansi_themes() {
-        let mut app = AppState::test_new();
-        app.palette = Palette::terminal();
-        app.statusline.enabled = true;
-        app.statusline.effects = true;
-        app.statusline.left = vec![StatusSegment::Widget {
-            widget: StatusWidget::Workspaces,
-        }];
-        push_workspace(&mut app, "stuck", AgentState::Blocked, true);
-
-        // Indexed red can't interpolate; tick 0 is the bright half-cycle.
-        app.spinner_tick = 0;
-        let content = build_content(&app, test_area(80));
-        let style = content.left[0].spans[1].style;
-        assert_eq!(style.fg, Some(app.palette.red));
-        assert!(!style.add_modifier.contains(Modifier::DIM));
-
-        // Mid-cycle the glyph blinks to faint, color unchanged.
-        app.spinner_tick = PULSE_PERIOD / 2;
-        let content = build_content(&app, test_area(80));
-        let style = content.left[0].spans[1].style;
-        assert_eq!(style.fg, Some(app.palette.red));
-        assert!(style.add_modifier.contains(Modifier::DIM));
+        // Upstream v0.8.0 removed the animation tick: the blocked glyph is a
+        // static ◉ in theme red regardless of the (now no-op) effects flag.
+        for effects in [false, true] {
+            app.statusline.effects = effects;
+            let content = build_content(&app, test_area(80));
+            assert_eq!(content.left[0].spans[1].content.as_ref(), "◉");
+            assert_eq!(content.left[0].spans[1].style.fg, Some(app.palette.red));
+        }
     }
 
     #[test]
@@ -1569,20 +1467,21 @@ mod tests {
         push_workspace(&mut app, "alpha", AgentState::Idle, true);
         app.active = Some(0);
 
-        app.statusline.effects = false;
-        let plain = build_content(&app, test_area(80));
-        app.statusline.effects = true;
+        // Baseline: a single-color chip of the same anatomy, to compare widths.
+        let mut plain_app = AppState::test_new();
+        plain_app.statusline.enabled = true;
+        plain_app.statusline.left = vec![StatusSegment::Widget {
+            widget: StatusWidget::Workspaces,
+        }];
+        push_workspace(&mut plain_app, "alpha", AgentState::Idle, true);
+        let plain = build_content(&plain_app, test_area(80));
         let fancy = build_content(&app, test_area(80));
 
         // Same cells, same text, same hit rects — only colors moved.
         assert_eq!(plain.left[0].width, fancy.left[0].width);
         assert_eq!(flat_text(&plain.left), flat_text(&fancy.left));
-        assert_eq!(
-            plain.hits.workspace_entries[0].rect,
-            fancy.hits.workspace_entries[0].rect
-        );
 
-        // Left edge anchors on the accent; the right edge lands on peach.
+        // The static gradient anchors on the accent and lands on peach.
         let first = fancy.left[0].spans.first().expect("chip has spans");
         let last = fancy.left[0].spans.last().expect("chip has spans");
         assert_eq!(first.style.bg, Some(app.palette.accent));
