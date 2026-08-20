@@ -155,6 +155,20 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   run `just check` (or the maintenance-script tests) and document any fork-only
   surface the new check names. The `conventional-commits` job skips merge
   commits (`git log --no-merges`), so sync merge subjects no longer fail it.
+- **`conventional-commits` only fails on master push, and must ignore synced-in
+  upstream commits.** On a PR the job validates only the PR *title*; on push to
+  `master` it validates every non-merge subject in
+  `${{ github.event.before }}..${{ github.event.after }}`. After a sync that
+  range includes all the upstream commits the merge pulled in — and the fork
+  cannot rewrite them, so a single non-conventional upstream subject (v0.8.0:
+  `Update rose pine surface_dim colour to "Overlay" (#2002)`) reddened master
+  CI even though the PR was green. `scripts/conventional_commits.py` (fork-owned)
+  therefore excludes the non-first parents of *upstream-sync* merges
+  (`UPSTREAM_SYNC_RE`: `sync with upstream` / `Merge remote-tracking branch
+  'upstream`), so only the fork's own commits are validated. Fork feature PR
+  merges are not syncs, so their commits are still checked. `just check` does
+  NOT run this validator (only `ci.yml` does), which is why Fork Release
+  preflight stays green when this job is red.
 - **Cross-compile builds follow `rust-toolchain.toml`.** v0.7.4 added
   `rust-toolchain.toml` (pins `1.96.1`), so `cargo build --target <cross>` uses
   that toolchain, not `stable`. The fork-release build job must `rustup target
