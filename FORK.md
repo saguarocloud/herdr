@@ -132,8 +132,12 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   governance and release workflows that need upstream-only secrets are disabled
   at the repo level (Actions settings, not file edits): `pr-gate`, `issue-gate`,
   `approve-contributor`, `approve-merged-contributor`,
-  `label-next-release-issues`, `release`, `preview`, `nix`, and `Website`
-  (`website.yml`). Re-check this list after upstream syncs add new workflows.
+  `label-next-release-issues`, `release`, `preview`, `nix`, `Website`
+  (`website.yml`), and `Windows ARM64 installer` (`windows-arm64.yml`, added by
+  the v0.8.2 sync — it only exercises upstream's `website/install.ps1` against
+  `herdr.dev/latest.json`, so it has nothing to validate on the fork).
+  `issue-gate.yml` was deleted upstream in v0.8.2. Re-check this list after
+  upstream syncs add new workflows.
 - **Why `Website` is disabled (v0.8.0).** The v0.8.0 `Website` workflow's
   "Validate published snapshots" step (`website/scripts/docs-versions.mjs` →
   `docs-snapshot.mjs`) runs `git ls-tree <v-tag> -- website/src/content/docs`
@@ -155,6 +159,12 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   run `just check` (or the maintenance-script tests) and document any fork-only
   surface the new check names. The `conventional-commits` job skips merge
   commits (`git log --no-merges`), so sync merge subjects no longer fail it.
+  v0.8.2 moved `website/src/data/config-reference.json` into
+  `docs/versions/0.8.0/website/src/data/`, so `config_reference_check` now gates
+  a single file, `docs/next/website/src/data/config-reference.json`. Register
+  new fork config fields there; the `docs/versions/0.8.0/` copy is the fork's
+  own published 0.8.0 snapshot and keeps the `ui.statusline.*` entries it
+  shipped with.
 - **`conventional-commits` only fails on master push, and must ignore synced-in
   upstream commits.** On a PR the job validates only the PR *title*; on push to
   `master` it validates every non-merge subject in
@@ -168,7 +178,9 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   'upstream`), so only the fork's own commits are validated. Fork feature PR
   merges are not syncs, so their commits are still checked. `just check` does
   NOT run this validator (only `ci.yml` does), which is why Fork Release
-  preflight stays green when this job is red.
+  preflight stays green when this job is red. Verified against the v0.8.2 sync:
+  the range held 134 non-merge subjects and the validator checked exactly 1 —
+  the fork's own `docs:` commit.
 - **Cross-compile builds follow `rust-toolchain.toml`.** v0.7.4 added
   `rust-toolchain.toml` (pins `1.96.1`), so `cargo build --target <cross>` uses
   that toolchain, not `stable`. The fork-release build job must `rustup target
@@ -297,3 +309,25 @@ right = [
   is now a no-op. Note: upstream now ships the two `config-reference.json` files
   intentionally divergent (preview vs stable), so they are no longer
   byte-identical — `config_reference_check` (both-documented) still gates.
+- **2026-08-19:** synced to upstream `v0.8.2` (133 commits, PR #11). Two
+  additive conflicts, both unions: `src/config.rs` re-exports (fork's
+  `StatusLine*`/`parse_color_opt` plus upstream's `StatusIndicatorStyle`,
+  `TabBarRightEntryConfig`, `THEME_NAMES`, `window_title::*`) and `src/events.rs`
+  (kept both `StatusLineRefreshed` and upstream's new `TabBarCommandFinished`).
+  Three *silent* semantic breaks that only surfaced at build/clippy time, not as
+  conflicts: `status::state_dot` was renamed `state_icon` and gained an
+  `indicator_style` argument (`app.status_indicators`);
+  `AppState::handle_mouse` gained an `InputSourceId` parameter (fork statusline
+  mouse tests now pass `crate::app::LOCAL_INPUT_SOURCE`); and
+  `handle_internal_event_with_pane_updates` now returns
+  `Vec<PaneStateUpdate>`, so the fork's `StatusLineRefreshed` arm needed
+  `return Vec::new()`. **Lesson: after a sync, always run `just check` with the
+  `rust-toolchain.toml` toolchain, not just `cargo build`** — clippy `-D
+  warnings` and `--all-targets` are what catch fork test code that a clean
+  auto-merge left calling a changed upstream signature. On macOS, note
+  `cargo`/`rustc` from Homebrew shadow the rustup shims; prepend
+  `/opt/homebrew/opt/rustup/bin` to `PATH` so the pinned `1.96.1` is used.
+  Upstream's `tests/live_handoff.rs` has two tests that are flaky/failing on
+  local macOS (`live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session`
+  reproduces on a pristine `v0.8.2` checkout); `ci.yml` excludes
+  `binary(live_handoff)` on macOS runners, so they do not gate CI.
