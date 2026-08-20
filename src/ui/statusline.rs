@@ -547,9 +547,10 @@ fn agents_item(app: &AppState) -> Option<StatusItem> {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
-        let (mut glyph, mut style) = super::status::state_dot(state, seen, p);
+        let (mut glyph, mut style) =
+            super::status::state_icon(state, seen, app.status_indicators, p);
         // Blocked/working take their bucket's static color so the rollup reads
-        // at a glance; other buckets keep the state_dot styling. The blocked
+        // at a glance; other buckets keep the state_icon styling. The blocked
         // ring mirrors the workspace-chip glyph.
         match key {
             "blocked" => {
