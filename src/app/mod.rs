@@ -5082,6 +5082,57 @@ right = [
         );
     }
 
+    /// Regression: the headless server renders the status line for its clients
+    /// but only ticks it while one is attached. With no client the deadline must
+    /// be excluded entirely -- scheduling `last_statusline_refresh + interval`
+    /// without ever advancing it leaves a deadline permanently in the past, so
+    /// `sleep_until` returns immediately and the select loop spins at 100% CPU.
+    #[test]
+    fn headless_next_loop_deadline_skips_statusline_without_a_client() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.config_diagnostic_deadline = None;
+        app.toast_deadline = None;
+        app.next_auto_update_check = None;
+        app.next_agent_manifest_update_check = None;
+        app.session_save_deadline = None;
+        app.state.workspaces.clear();
+        app.state.statusline.enabled = true;
+        app.state.statusline.left = vec![crate::config::StatusSegment::Text(" herdr ".into())];
+        // Never ticked, so the raw deadline is already in the past.
+        assert!(app.statusline_refresh_deadline().is_some_and(|d| d <= now));
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, false),
+            None,
+            "a status line the headless server never ticks must not pin the loop deadline"
+        );
+    }
+
+    /// With a client attached the headless server does tick the status line, so
+    /// the deadline is scheduled -- and ticking must push it into the future.
+    #[test]
+    fn headless_statusline_tick_advances_the_loop_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.state.statusline.enabled = true;
+        app.state.statusline.left = vec![crate::config::StatusSegment::Text(" herdr ".into())];
+
+        assert!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, true)
+                .is_some_and(|deadline| deadline <= now),
+            "an unticked status line is due immediately"
+        );
+
+        assert!(app.tick_statusline(now), "a due status line ticks");
+
+        assert!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, true)
+                .is_some_and(|deadline| deadline > now),
+            "ticking must move the deadline into the future so the loop sleeps"
+        );
+    }
+
     #[test]
     fn headless_next_loop_deadline_returns_none_when_resize_poll_is_only_deadline() {
         let mut app = test_app();

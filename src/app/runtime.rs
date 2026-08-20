@@ -654,16 +654,27 @@ impl App {
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
+        self.next_loop_deadline_with_resize_poll(now, needs_render, true, true, true)
     }
 
+    /// `include_client_refreshes` covers periodic work that only matters while a
+    /// client is attached and rendering: git status and the status line. The
+    /// headless server must not schedule either without a client — and must not
+    /// schedule the status-line deadline unless it also ticks it, or the loop
+    /// wakes on a deadline that never advances and spins.
     pub(crate) fn next_headless_loop_deadline_with_git_refresh(
         &self,
         now: Instant,
         needs_render: bool,
-        include_git_refresh: bool,
+        include_client_refreshes: bool,
     ) -> Option<Instant> {
-        self.next_loop_deadline_with_resize_poll(now, needs_render, false, include_git_refresh)
+        self.next_loop_deadline_with_resize_poll(
+            now,
+            needs_render,
+            false,
+            include_client_refreshes,
+            include_client_refreshes,
+        )
     }
 
     fn next_loop_deadline_with_resize_poll(
@@ -672,6 +683,7 @@ impl App {
         needs_render: bool,
         include_resize_poll: bool,
         include_git_refresh: bool,
+        include_statusline: bool,
     ) -> Option<Instant> {
         let render_deadline = if needs_render {
             self.last_render_at
@@ -691,7 +703,9 @@ impl App {
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
-            self.statusline_refresh_deadline(),
+            include_statusline
+                .then(|| self.statusline_refresh_deadline())
+                .flatten(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,

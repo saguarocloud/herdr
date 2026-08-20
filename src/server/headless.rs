@@ -4780,6 +4780,11 @@ impl HeadlessServer {
 
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
+            // The server renders the status line for its clients, so it must
+            // also advance `last_statusline_refresh`. Scheduling the deadline
+            // without ticking it leaves it permanently in the past and the
+            // select loop stops sleeping.
+            changed |= self.app.tick_statusline(now);
         }
 
         if self
