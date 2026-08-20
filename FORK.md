@@ -268,9 +268,33 @@ right = [
   path in `App::tick_statusline` and cache via `AppEvent::StatusLineRefreshed`.
   Static gradient color math lives in `src/ui/effects.rs` (spatial only — the
   tick-driven `wave`/`pulse_*` functions were removed in the v0.8.0 sync).
-  Working-pane agent marks come from upstream's static `status::state_dot`.
+  Working-pane agent marks come from upstream's static `status::state_icon`
+  (renamed from `state_dot` in the v0.8.2 sync, and now takes the user's
+  `ui.status_indicators` Dots/Symbols setting).
   Mouse handling is `statusline_mouse()` in `src/app/input/mouse.rs`, mode-gated
   so bar clicks cannot hijack modals.
+- **The server ticks the bar, not the client — schedule and advance together.**
+  The status line is drawn server-side: `server/render_stream.rs` calls
+  `ui::render_with_runtime_registry`, which renders the bar and streams the frame
+  to clients. So the *server* owns `App::tick_statusline`, and both halves must
+  live on the same path. `statusline_refresh_deadline()` feeds
+  `next_loop_deadline_with_resize_poll`, which is shared by the monolithic TUI
+  loop and the headless server loop, but `tick_statusline` was only wired into
+  the monolithic `handle_scheduled_tasks`. `last_statusline_refresh` is
+  initialised *in the past* on purpose (`Instant::now() - interval`, so the first
+  tick fires immediately), so on the server it stayed in the past forever: the
+  loop woke on a deadline that never advanced, `sleep_until` returned instantly
+  every iteration, and the headless server **burned a full core doing nothing** —
+  reproducible with zero panes and zero clients. It also meant command segments
+  never refreshed in server mode. Fixed by gating the deadline on
+  `has_app_client()` (the same flag git-status refresh already uses) and ticking
+  the bar on the headless path. Regression tests:
+  `headless_next_loop_deadline_skips_statusline_without_a_client` and
+  `headless_statusline_tick_advances_the_loop_deadline`.
+  **Rule for future fork state:** anything added to the shared loop-deadline list
+  must be advanced by *every* loop that schedules it, or gated off the loops that
+  do not. This is the runtime/client boundary guardrail in `CLAUDE.md` biting in
+  its least visible form — no crash, no failing test, just a pegged CPU.
 - **New files:** `src/ui/statusline.rs`, `src/ui/effects.rs`. Touched upstream
   files (rebase conflict surface): `config/model.rs`, `config.rs`,
   `config/theme.rs`, `app/state.rs`, `app/mod.rs`, `app/runtime.rs`,
@@ -278,6 +302,13 @@ right = [
   `events.rs`, `ui.rs`, `main.rs`.
 
 ## History
+
+- **2026-08-20:** fixed a fork-only headless busy loop: the status-line refresh
+  deadline was scheduled by the shared loop-deadline helper but only advanced on
+  the monolithic path, so `herdr server` spun at 100% CPU whenever
+  `[ui.statusline] enabled = true`. Measured on an empty session: +5.01s CPU per
+  5s wall with the bar on, +0.00s with it off or patched. See the status-line
+  section above.
 
 - **2026-07-06:** statusline v1 (segments/tokens/commands), v2 (widgets,
   per-segment colors, mouse), v3 (animated effects, mode widget, gradients).
