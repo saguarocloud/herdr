@@ -88,6 +88,13 @@ Notes:
   the v0.9.0 client-owned-shell refactor rewrote those tests.
   Re-verify against a pristine tag before blaming the fork:
   `git worktree add /tmp/herdr-pristine <tag> && cargo nextest run -E 'binary(live_handoff)'`.
+- **`sound::tests::windows_media_player_reports_invalid_media_without_waiting_for_timeout`
+  is a Windows CI flake.** It drives real Windows Media Player through
+  PowerShell and asserts a `MediaFailed` error reaches stderr, so it is
+  timing- and runner-image-dependent. It reddened `check (windows-latest)` on
+  the v0.9.0 sync PR and passed on re-run with byte-identical code
+  (`src/sound.rs` is untouched by the fork and unchanged upstream since
+  v0.8.2). Re-run the job before investigating.
 - `just` is not installed here; run the recipe bodies from the `justfile`
   directly (routing cargo build/test steps through `.local/build-macos.sh`).
   As of v0.9.0, `just check` = `lint` (fmt + clippy `--all-targets -D warnings`)
@@ -149,8 +156,18 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   upstream's installer against `herdr.dev/latest.json`, so it has nothing to
   validate on the fork), and — **new in the v0.9.0 sync, must be disabled by
   hand** — `Trigger Website Deploy` (`website-deploy.yml`) and
-  `Distribution contract` (`distribution.yml`). `issue-gate.yml` was deleted
-  upstream in v0.8.2. Re-check this list after upstream syncs add new workflows.
+  `Distribution contract` (`distribution.yml`, disabled during the v0.9.0 sync).
+  `issue-gate.yml` was deleted upstream in v0.8.2. Re-check this list after
+  upstream syncs add new workflows.
+- **A workflow cannot be disabled until it exists on the default branch.**
+  GitHub only registers a workflow once it is on `master`, so
+  `gh workflow disable website-deploy.yml` answers `not found on the default
+  branch` while the sync is still on its PR branch. A workflow with a
+  `pull_request:` trigger (like `distribution.yml`) registers as soon as the PR
+  opens and can be disabled immediately; one triggered only by
+  `workflow_dispatch` + `push: master` (like `website-deploy.yml`) cannot.
+  **Disable those the moment the sync merges**, before the first push to
+  `master` fires them.
 - **v0.9.0 renamed the website workflow, which silently re-enables it.** The
   repo-level disable is keyed to the workflow's *name*, and v0.9.0 renamed
   `website.yml` (`Website`) to `website-deploy.yml` (`Trigger Website Deploy`).
