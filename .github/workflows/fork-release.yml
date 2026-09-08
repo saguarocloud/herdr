@@ -4,8 +4,11 @@ on:
   push:
     branches:
       - master
+    # Docs-only pushes do not need a fork build. Upstream v0.9.0 removed the
+    # in-repo `website/` tree (the website moved private), so the docs that
+    # still live here are the staged/published trees under `docs/`.
     paths-ignore:
-      - "website/**"
+      - "docs/**"
   # Manual dry-run: dispatch on any branch to run preflight + the cross-compile
   # build matrix without publishing (the release job is gated to master below).
   # Use this to validate release-build changes on a branch before merging.
