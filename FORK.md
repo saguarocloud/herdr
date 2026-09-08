@@ -73,29 +73,48 @@ Notes:
   which pins Zig 0.15.2 against the older MacOSX15.4 SDK from CommandLineTools.
 - **Use nextest, not `cargo test`.** Plain `cargo test` is flaky here from
   in-process env races.
-- **6 known-environmental test failures.** These live PTY integration tests fail
-  on this machine on every commit, including pristine upstream — likely because
-  tests run inside a live herdr session. Exclude them when validating:
-  `cross_area_agent_process_survives_detach_and_reattach`,
-  `cross_area_two_clients_shared_view_and_single_detach_stability`,
-  `events_subscribe_streams_output_and_agent_status_events`,
-  `live_server_holds_one_pty_master_fd_per_pane`,
-  `multi_client_broadcasts_frame_updates_to_all_clients`,
-  `live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session` (added in the
-  v0.8.0 sync — verified failing identically on pristine `v0.8.0` with
-  `agent_not_found`, so environmental, not a fork regression). One more,
-  `inactive_owner_cancels_idle_stream_and_dispatches_close`, is a load-only
-  tokio-timing flake: it fails under full-suite concurrency but passes in
-  isolation, so it does not need excluding — just re-run it alone.
+- **Known-environmental test failures live in `binary(live_handoff)`.** These
+  live PTY integration tests fail on this machine because the suite runs inside
+  a live herdr session, not because of fork changes. Upstream's own `ci.yml`
+  excludes `binary(live_handoff)` on macOS runners, so they never gate CI.
+  As of the v0.9.0 sync the full suite is 3165 tests with exactly 2 failures,
+  both in that binary: `live_handoff_preserves_pane_process_io` and
+  `live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session`. **Verified
+  environmental**: a pristine `v0.9.0` worktree fails both plus a third
+  (`live_handoff_keeps_agent_started_pane_after_agent_exits`), so the fork tree
+  is strictly cleaner than upstream here. The v0.8.x-era `cross_area_*`,
+  `events_subscribe_*`, `live_server_holds_one_pty_master_fd_per_pane`, and
+  `multi_client_broadcasts_frame_updates_to_all_clients` failures are gone —
+  the v0.9.0 client-owned-shell refactor rewrote those tests.
+  Re-verify against a pristine tag before blaming the fork:
+  `git worktree add /tmp/herdr-pristine <tag> && cargo nextest run -E 'binary(live_handoff)'`.
+- **`sound::tests::windows_media_player_reports_invalid_media_without_waiting_for_timeout`
+  is a Windows CI flake.** It drives real Windows Media Player through
+  PowerShell and asserts a `MediaFailed` error reaches stderr, so it is
+  timing- and runner-image-dependent. It reddened `check (windows-latest)` on
+  the v0.9.0 sync PR and passed on re-run with byte-identical code
+  (`src/sound.rs` is untouched by the fork and unchanged upstream since
+  v0.8.2). Re-run the job before investigating.
 - `just` is not installed here; run the recipe bodies from the `justfile`
   directly (routing cargo build/test steps through `.local/build-macos.sh`).
+  As of v0.9.0, `just check` = `lint` (fmt + clippy `--all-targets -D warnings`)
+  + `nextest run` + `maintenance-test` + `ui-hot-path-architecture-test` +
+  `integration-assets-test` + `plugin-marketplace-test` + `windows-lint` +
+  `docs-contract-test`. The bun-based steps (`bun test ./scripts/docs`,
+  `bun test src/integration/assets/...`, and `cd workers/plugin-marketplace &&
+  bun install --frozen-lockfile && bun test`) need `bun` on PATH.
+- **Run `windows-lint` before pushing.** `LIBGHOSTTY_VT_SIMD=false cargo clippy
+  --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings` is part
+  of `just check` and is the only local check that compiles the `cfg(windows)`
+  paths. Fork code that only ever ran on macOS can still break it.
 
 ## Fork releases and CI
 
 The fork publishes identifiable build artifacts from GitHub Actions:
 
 - **Release pipeline:** `.github/workflows/fork-release.yml` (fork-only file)
-  runs on every push to `master` (docs-only `website/**` pushes are skipped).
+  runs on every push to `master` (docs-only `docs/**` pushes are skipped; this
+  was `website/**` until v0.9.0 removed the in-repo website).
   It gates on `just check`, builds the same four targets as upstream stable
   releases (`herdr-{linux,macos}-{x86_64,aarch64}` plus `.sha256` checksums),
   and publishes a GitHub release on `saguarocloud/herdr`, pruned to the newest
@@ -132,21 +151,48 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   governance and release workflows that need upstream-only secrets are disabled
   at the repo level (Actions settings, not file edits): `pr-gate`, `issue-gate`,
   `approve-contributor`, `approve-merged-contributor`,
-  `label-next-release-issues`, `release`, `preview`, `nix`, `Website`
-  (`website.yml`), and `Windows ARM64 installer` (`windows-arm64.yml`, added by
-  the v0.8.2 sync — it only exercises upstream's `website/install.ps1` against
-  `herdr.dev/latest.json`, so it has nothing to validate on the fork).
+  `label-next-release-issues`, `release`, `preview`, `nix`, `Windows ARM64
+  installer` (`windows-arm64.yml`, added by the v0.8.2 sync — it only exercises
+  upstream's installer against `herdr.dev/latest.json`, so it has nothing to
+  validate on the fork), and — **new in the v0.9.0 sync, must be disabled by
+  hand** — `Trigger Website Deploy` (`website-deploy.yml`) and
+  `Distribution contract` (`distribution.yml`, disabled during the v0.9.0 sync).
   `issue-gate.yml` was deleted upstream in v0.8.2. Re-check this list after
   upstream syncs add new workflows.
-- **Why `Website` is disabled (v0.8.0).** The v0.8.0 `Website` workflow's
-  "Validate published snapshots" step (`website/scripts/docs-versions.mjs` →
-  `docs-snapshot.mjs`) runs `git ls-tree <v-tag> -- website/src/content/docs`
-  against upstream release tags like `v0.7.5`. The fork tags releases `fork-v*`,
-  **never** `v*` (so upstream's `release.yml` can't fire on it), so those tags
-  don't exist on the fork remote and the step dies with `fatal: Not a valid
-  object name v0.7.5`. Pushing `v*` tags to the fork is not an option — it would
-  trigger the very workflows the `fork-v*` scheme avoids — so the workflow is
-  disabled at the repo level instead.
+- **A workflow cannot be disabled until it exists on the default branch.**
+  GitHub only registers a workflow once it is on `master`, so
+  `gh workflow disable website-deploy.yml` answers `not found on the default
+  branch` while the sync is still on its PR branch. A workflow with a
+  `pull_request:` trigger (like `distribution.yml`) registers as soon as the PR
+  opens and can be disabled immediately; one triggered only by
+  `workflow_dispatch` + `push: master` (like `website-deploy.yml`) cannot.
+  **Disable those the moment the sync merges**, before the first push to
+  `master` fires them.
+- **v0.9.0 renamed the website workflow, which silently re-enables it.** The
+  repo-level disable is keyed to the workflow's *name*, and v0.9.0 renamed
+  `website.yml` (`Website`) to `website-deploy.yml` (`Trigger Website Deploy`).
+  A rename therefore arrives enabled. After any sync, diff
+  `.github/workflows/` and re-disable anything renamed or added. This is the
+  one piece of fork maintenance that cannot be done in a commit.
+- **Why `Distribution contract` must be disabled (v0.9.0).** Its `validate` job
+  runs `node scripts/docs/versions.mjs check`, which calls `resolveCommit(git,
+  entry.tag)` for every entry in `docs/versions/manifest.json` — i.e. it
+  resolves upstream release tags like `v0.9.0`. Same failure mode that took out
+  `Website`: the fork never pushes `v*` tags (confirmed: `git ls-remote --tags
+  origin 'v*'` returns nothing), so the step dies with `fatal: Not a valid
+  object name`. It passes locally only because the local checkout has upstream
+  tags from the `upstream` remote — do not let that mislead you into thinking
+  the fork's CI will pass.
+- **Why the website workflow is disabled (v0.8.0, still true).** Its published
+  snapshot validation runs `git ls-tree <v-tag>` against upstream release tags
+  like `v0.7.5`. The fork tags releases `fork-v*`, **never** `v*` (so upstream's
+  `release.yml` can't fire on it), so those tags don't exist on the fork remote
+  and the step dies with `fatal: Not a valid object name v0.7.5`. Pushing `v*`
+  tags to the fork is not an option — it would trigger the very workflows the
+  `fork-v*` scheme avoids — so the workflow is disabled at the repo level
+  instead. v0.9.0 moved the website out of this repo entirely, but kept the same
+  tag-resolving validation in `distribution.yml`, so the rule survives its
+  original workflow.
 - **Syncs can add consistency checks that fork-only surface must satisfy.**
   A sync's Rust build/tests can pass while a *new* maintenance check fails on
   fork-only code. v0.7.4 added `scripts/config_reference_check.py`, which fails
@@ -273,35 +319,111 @@ right = [
   `ui.status_indicators` Dots/Symbols setting).
   Mouse handling is `statusline_mouse()` in `src/app/input/mouse.rs`, mode-gated
   so bar clicks cannot hijack modals.
-- **The server ticks the bar, not the client — schedule and advance together.**
-  The status line is drawn server-side: `server/render_stream.rs` calls
-  `ui::render_with_runtime_registry`, which renders the bar and streams the frame
-  to clients. So the *server* owns `App::tick_statusline`, and both halves must
-  live on the same path. `statusline_refresh_deadline()` feeds
-  `next_loop_deadline_with_resize_poll`, which is shared by the monolithic TUI
-  loop and the headless server loop, but `tick_statusline` was only wired into
-  the monolithic `handle_scheduled_tasks`. `last_statusline_refresh` is
-  initialised *in the past* on purpose (`Instant::now() - interval`, so the first
-  tick fires immediately), so on the server it stayed in the past forever: the
-  loop woke on a deadline that never advanced, `sleep_until` returned instantly
-  every iteration, and the headless server **burned a full core doing nothing** —
-  reproducible with zero panes and zero clients. It also meant command segments
-  never refreshed in server mode. Fixed by gating the deadline on
-  `has_app_client()` (the same flag git-status refresh already uses) and ticking
-  the bar on the headless path. Regression tests:
-  `headless_next_loop_deadline_skips_statusline_without_a_client` and
-  `headless_statusline_tick_advances_the_loop_deadline`.
-  **Rule for future fork state:** anything added to the shared loop-deadline list
-  must be advanced by *every* loop that schedules it, or gated off the loops that
-  do not. This is the runtime/client boundary guardrail in `CLAUDE.md` biting in
-  its least visible form — no crash, no failing test, just a pegged CPU.
-- **New files:** `src/ui/statusline.rs`, `src/ui/effects.rs`. Touched upstream
-  files (rebase conflict surface): `config/model.rs`, `config.rs`,
-  `config/theme.rs`, `app/state.rs`, `app/mod.rs`, `app/runtime.rs`,
-  `app/api.rs`, `app/actions.rs`, `app/input/{modal,mouse,sidebar}.rs`,
-  `events.rs`, `ui.rs`, `main.rs`.
+- **The bar is client chrome since v0.9.0 — it lives in `client/shell/`.**
+  Upstream v0.9.0 (#3487) moved the whole terminal UI out of the server and into
+  each client, so the bar is rendered by the client alongside the sidebar and
+  tab bar. `render_shell()` (`client/shell/render.rs`) draws it from the
+  endpoint's `ClientShellSnapshot` plus client-local `ClientShellConfig`; hits
+  land in `ShellHitMap::statusline`, and `ClientShellState::tick_statusline`
+  refreshes command segments in the client's own loop.
+  **This structurally retired the fork's worst bug.** Before v0.9.0 the bar was
+  server-rendered, and `statusline_refresh_deadline()` fed the shared
+  `next_loop_deadline_with_resize_poll` while `tick_statusline` was wired only
+  into the monolithic TUI loop. `last_statusline_refresh` starts *in the past* on
+  purpose (so the first tick fires immediately), so on the headless server it
+  stayed in the past forever: the loop woke on a deadline that never advanced,
+  `sleep_until` returned instantly every iteration, and the server **burned a
+  full core doing nothing** with zero panes and zero clients. There is no longer
+  a server loop deadline to leave unadvanced — the deadline and the work that
+  clears it are in the same loop by construction.
+  **Rule for future fork state (still load-bearing):** anything added to a shared
+  loop-deadline list must be advanced by *every* loop that schedules it, or gated
+  off the loops that do not. Kept as a live assertion by
+  `tick_advances_its_own_deadline_instead_of_refiring`.
+- **Workspace names come from the snapshot now — the bar cannot drift.** Before
+  v0.9.0 the bar re-derived space names from `AppState` + the terminal runtime
+  registry, deliberately mirroring the sidebar, and a fork fix (`e2fe906`) existed
+  purely to keep the two in step. The endpoint now resolves names once into
+  `ClientShellWorkspace::label`, and the bar renders that string verbatim, so the
+  whole class of naming-drift bug is gone along with the four tests that guarded
+  it. `workspace_chip_uses_the_snapshot_label_verbatim` replaces them.
+- **Do not add fields to `ClientShellSnapshot` for the bar.** `CLAUDE.md`'s
+  stable client endpoint contract makes named core codecs immutable, and the bar
+  needs nothing new: workspaces, tabs, panes, agents, and focus are all already
+  in the snapshot. Command segments run *locally* in the client, which is also
+  the semantically right answer — they are presentation, and they should describe
+  the machine the user is looking at.
+- **Three traps found in code review of the v0.9.0 port — do not reintroduce.**
+  1. *Command cwd.* `ClientShellWorkspace::new_workspace_cwd` looks like the
+     workspace directory but is already resolved through the user's
+     `terminal.new_cwd` policy, so with `new_cwd = "home"` it is `$HOME`. A
+     `git branch` segment would then describe the wrong repo. Use
+     `statusline_command_cwd()`, which reads the focused workspace's pane cwd —
+     the client-side equivalent of the pre-0.9 `resolved_identity_cwd_from`.
+  2. *Reload must not release the in-flight slot.* Only one command batch runs at
+     a time, and that is the only thing bounding worker threads. Clearing
+     `in_flight` on config reload let the next tick start a second batch, so
+     repeated reloads with a slow command spawned threads without bound.
+     `reset()` therefore keeps the slot and bumps a generation instead; a batch
+     landing with a stale generation is discarded, because its `(side, index)`
+     keys index a segment list that no longer exists.
+  3. *Overlays own the mouse.* The bar's mouse handler runs before upstream's
+     overlay handling, which dismisses the global menu on a click outside its
+     rows. Letting the bar act while its own menu was open meant a chip click
+     focused a space and left the menu stranded, and would let the bar steal
+     clicks from an overlay drawn across its row. The handler now returns early
+     for *any* open overlay; the menu button still toggles closed through
+     upstream's click-outside path.
+- **Command segments run on a detached thread, one batch at a time.**
+  `statusline_command_jobs()` keys output by `(side, index)` over the FULL side
+  vec, and `build_side_items` reads the same key — keep them in lockstep or
+  output lands on the wrong segment (`command_output_indexing_survives_interleaved_widgets`
+  guards this). A batch in flight blocks the next one, so a slow command throttles
+  the bar instead of forking processes without bound; the client loop is never
+  blocked. Commands are argv (never a shell), get a null stdin so a segment
+  cannot steal the terminal's input, and are killed at `COMMAND_BATCH_TIMEOUT`
+  so one hung segment cannot freeze the bar for the life of the client.
+- **New files:** `src/client/shell/statusline.rs`, `src/client/shell/effects.rs`.
+  Touched upstream files (merge conflict surface): `config/model.rs`, `config.rs`,
+  `config/theme.rs`, `app/state.rs` (just `Palette::color_token`),
+  `client/shell.rs`, `client/shell/{state,config,render,composition,mouse,global_menu}.rs`,
+  `client/mod.rs`, `main.rs`.
 
 ## History
+
+- **2026-09-07:** synced to upstream `v0.9.0` (110 commits) — the **largest and
+  most structural sync so far**, because upstream moved the entire terminal UI
+  out of the server and into each client (#3487) and dissolved `src/app/input/`
+  into `src/client/shell/`. The fork's status line was server-rendered chrome
+  built from `&AppState`, so this was a **port, not a merge**: the bar moved to
+  `src/client/shell/{statusline,effects}.rs`, was rebuilt against
+  `ClientShellSnapshot` + `ClientShellConfig`, got a `Rect` in
+  `ClientShellLayout`, hits in `ShellHitMap`, a draw call in `render_shell()`,
+  a handler in `client/shell/mouse.rs`, and a refresh tick in the client loop.
+  Conflicts: 8 files. Three were pure deletions of upstream code the fork had
+  touched (`app/input/{modal,mouse,sidebar}.rs`); `app/{mod,runtime,state}.rs`
+  and `ui.rs` were upstream gutting server-side shell rendering with fork hooks
+  embedded — resolved to upstream, with only `Palette::color_token` kept in
+  `app/state.rs` (the client still uses `Palette`); `config.rs` was the usual
+  re-export union. The server-side statusline plumbing
+  (`AppEvent::StatusLineRefreshed`, `apply_statusline_outputs`, the headless
+  `tick_statusline` call) was deleted rather than ported.
+  **Three things this sync improved, not just preserved:** the v0.8.20 headless
+  busy-loop bug is now structurally impossible (no server deadline to leave
+  unadvanced); workspace-name drift between the bar and sidebar is impossible
+  (the endpoint ships one resolved `label`); and command segments now run on the
+  viewing machine, which is what they always should have described. Rendering
+  also changed from `Frame`/`Paragraph` to direct `Buffer` writes to match the
+  rest of the client chrome.
+  **Repo-settings follow-up (cannot be done in a commit):** `website.yml` was
+  renamed to `website-deploy.yml`, so its repo-level disable did not carry over,
+  and the new `distribution.yml` resolves `v*` tags the fork never pushes. Both
+  must be disabled in Actions settings. See "Fork releases and CI".
+  Validation: `just check` equivalents all green (fmt, clippy `--all-targets -D
+  warnings`, Windows cross-lint, 3163/3165 nextest, 113 maintenance-script
+  tests, bun docs/integration/marketplace suites). The 2 failures are in
+  `binary(live_handoff)`, which upstream's own macOS CI excludes, and a pristine
+  `v0.9.0` worktree fails those two plus a third.
 
 - **2026-08-20:** fixed a fork-only headless busy loop: the status-line refresh
   deadline was scheduled by the shared loop-deadline helper but only advanced on
