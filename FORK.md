@@ -423,6 +423,28 @@ right = [
 
 ## History
 
+- **2026-09-30:** synced to upstream `v0.9.3` (96 commits from `v0.9.1`), which
+  is a hotfix one day after `v0.9.2` — so this picks up both. **Zero Rust
+  conflicts.** All 15 conflicts were upstream-owned docs/metadata
+  (`CHANGELOG.md`, `Cargo.toml`/`Cargo.lock`, `skills/herdr/SKILL.md`, and the
+  `docs/next/website` en/ja/zh-cn pages), every one of which the fork has never
+  edited — verified per-file with `git diff v0.9.1 master -- <file>` before
+  resolving them all to upstream rather than eyeballing them. The conflicts
+  exist only because the merge base sits between the two tags, not because of
+  any fork divergence.
+  The v0.9.0 client-shell port has now absorbed two upstream releases without a
+  single code conflict, and compiled clean on the first `--all-targets` check —
+  no repeat of the silent signature breaks from the v0.8.2 and v0.9.1 syncs.
+  `v0.9.2`'s breaking change (the Herdr-specific pane graphics API removed) does
+  not touch the bar. Zig stays at 0.16.0 and `PROTOCOL_VERSION` stays at 22, so
+  no toolchain work and a same-protocol handoff.
+  `just maintenance-test` gained `scripts.test_windows_input` — re-read the
+  recipe, as the previous entry warns.
+  Validation: fmt, clippy `--all-targets -D warnings`, **3766/3766 nextest**,
+  maintenance + fork script tests, and all three bun suites. `just windows-lint`
+  still needs the one-time Microsoft SDK setup that has deliberately not been
+  accepted; CI's native `check (windows-latest)` covers it.
+
 - **2026-09-21:** synced to upstream `v0.9.1` (135 commits) — a **patch release
   with a heavy client-shell diff**, since upstream spent the cycle on SSH
   machines, selection, and graphics. Only **two conflicts**, both small unions:
