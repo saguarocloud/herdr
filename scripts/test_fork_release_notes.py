@@ -8,8 +8,10 @@ from scripts import fork_release_notes
 
 class BuildForkNotesTest(unittest.TestCase):
     def build(self, subjects, previous="fork-v0.7.2-1111111"):
+        # Patched on fork_release_notes itself: the grouping helpers moved here
+        # when upstream v0.9.1 deleted them from scripts/preview.py.
         with mock.patch.object(
-            fork_release_notes.preview, "commit_subjects", return_value=subjects
+            fork_release_notes, "commit_subjects", return_value=subjects
         ):
             return fork_release_notes.build_fork_notes(
                 previous=previous,
@@ -81,3 +83,51 @@ class BuildForkNotesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpstreamDependencySurfaceTest(unittest.TestCase):
+    """Guard the fork's dependency on upstream's scripts/preview.py.
+
+    Upstream v0.9.1 deleted `commit_subjects`, `humanize_subject` and
+    `TYPE_ORDER` from preview.py, which broke this generator and was only
+    caught because its tests happened to patch one of them. Nothing asserted
+    that the borrowed surface still existed. This does.
+    """
+
+    def test_borrowed_upstream_helpers_still_exist(self):
+        from scripts import preview
+
+        for name in fork_release_notes.UPSTREAM_PREVIEW_HELPERS:
+            self.assertTrue(
+                hasattr(preview, name),
+                f"scripts/preview.py no longer provides {name!r}; inline it into "
+                "scripts/fork_release_notes.py rather than editing upstream",
+            )
+
+    def test_grouping_helpers_are_fork_owned(self):
+        # These must NOT come back from preview.py: they are fork-only
+        # behaviour and upstream has already deleted them once.
+        for name in ("TYPE_ORDER", "commit_subjects", "humanize_subject"):
+            self.assertTrue(hasattr(fork_release_notes, name))
+
+
+class HumanizeSubjectTest(unittest.TestCase):
+    def test_maps_conventional_types_to_headings(self):
+        cases = [
+            ("feat: add a thing", "Added", "Add a thing"),
+            ("fix(scope): repair a thing", "Fixed", "Repair a thing"),
+            ("perf!: speed a thing up", "Performance", "Speed a thing up"),
+            ("chore: tidy", "Maintenance", "Tidy"),
+            ("not conventional at all", "Other", "Not conventional at all"),
+        ]
+        for subject, heading, body in cases:
+            with self.subTest(subject=subject):
+                self.assertEqual(
+                    fork_release_notes.humanize_subject(subject), (heading, body)
+                )
+
+    def test_release_automation_subjects_are_hidden(self):
+        self.assertTrue(
+            fork_release_notes.hidden_subject("docs: update preview manifest")
+        )
+        self.assertFalse(fork_release_notes.hidden_subject("feat: a real change"))
