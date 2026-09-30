@@ -23,6 +23,11 @@ env:
   # are added to the toolchain the build actually uses (upstream release.yml
   # does the same). Keep in sync with rust-toolchain.toml on upstream syncs.
   RUST_TOOLCHAIN_VERSION: 1.96.1
+  # Must match the `Install Zig` step in upstream's .github/workflows/ci.yml.
+  # Upstream bumped this to 0.16.0 in v0.9.1 and every Fork Release failed
+  # until this pin followed, because the vendored libghostty-vt build script
+  # hard-fails on an older Zig. Check it on every upstream sync.
+  ZIG_VERSION: "0.16.0"
 
 concurrency:
   group: fork-release
@@ -86,17 +91,28 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
 
+      # `just ci` + `just docs-contract-test` is `just check` minus
+      # `windows-lint`. Since v0.9.1 that step shells out to
+      # scripts/windows_cross.py, which hard-requires a Microsoft Windows SDK
+      # downloaded via xwin -- not something to provision (or accept a license
+      # for) on every release run. Upstream does not run it on Linux either:
+      # their ci.yml gates `just check` behind `matrix.kind == 'windows'`, and
+      # their release.yml runs no checks at all. The fork's Windows coverage
+      # comes from the native `check (windows-latest)` job that ran on the PR
+      # which produced this commit.
       - name: Run checks
-        run: just check
+        run: |
+          just ci
+          just docs-contract-test
 
       - name: Run fork script tests
         run: python3 -m unittest scripts.test_fork_release_notes
@@ -140,27 +156,13 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: ${{ matrix.target }}
 
+      # One Zig for every runner, matching upstream's release.yml. The macOS
+      # Homebrew `zig@0.15` detour this used to take existed only because Zig
+      # 0.15.2 could not parse the macOS 26 SDK; 0.16.0 parses it fine.
       - name: Install Zig
-        if: runner.os != 'macOS'
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.15.2
-
-      - name: Restore Homebrew Zig cache
-        if: runner.os == 'macOS'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/Library/Caches/Homebrew/downloads
-          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
-          restore-keys: |
-            homebrew-zig-0.15-${{ runner.os }}-
-
-      - name: Install patched Zig on macOS
-        if: runner.os == 'macOS'
-        run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
-          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
-          "$(brew --prefix zig@0.15)/bin/zig" version
+          version: ${{ env.ZIG_VERSION }}
 
       - name: Prefer official Ubuntu mirrors over Azure
         if: runner.os == 'Linux'

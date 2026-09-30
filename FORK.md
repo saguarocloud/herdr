@@ -259,6 +259,30 @@ The fork publishes identifiable build artifacts from GitHub Actions:
   preflight stays green when this job is red. Verified against the v0.8.2 sync:
   the range held 134 non-merge subjects and the validator checked exactly 1 —
   the fork's own `docs:` commit.
+- **`fork-release.yml` pins its own toolchains, and upstream bumps break it
+  silently.** The workflow is fork-owned, so an upstream sync never updates it,
+  and its failures land on `master` *after* the PR is merged — PR CI stays
+  green, so nothing warns you. **v0.9.1 moved the vendored libghostty-vt to Zig
+  0.16.0 and this pin stayed at 0.15.2, so every Fork Release from the v0.9.1
+  merge onward failed** at `preflight / Run checks` with `Building Herdr
+  requires Zig 0.16.0`, publishing no binaries. Fixed by hoisting the version
+  into a `ZIG_VERSION` env var matched to upstream's `ci.yml`, switching to the
+  same `vercel-labs/setup-zig` action upstream uses, and deleting the macOS
+  `brew install zig@0.15` detour (that existed only for the 0.15.2 macOS-SDK
+  problem, which 0.16.0 does not have). **After every sync, diff
+  `.github/workflows/ci.yml`'s toolchain steps against `fork-release.yml`'s
+  `RUST_TOOLCHAIN_VERSION` and `ZIG_VERSION`, and check the Fork Release run on
+  `master` after merging — not just the PR.**
+- **Fork Release preflight runs `just ci`, not `just check`.** `just check` on
+  Unix is `ci` + `windows-lint`, and since v0.9.1 `windows-lint` shells out to
+  `scripts/windows_cross.py`, which hard-requires a Microsoft Windows SDK
+  fetched through `xwin`. That cannot run on a bare Linux runner without
+  downloading the SDK and accepting Microsoft's license in automation. Upstream
+  does not do it either: their `ci.yml` gates `just check` behind
+  `matrix.kind == 'windows'`, and their `release.yml` runs no checks at all.
+  The fork keeps the stricter gate minus that one step (`just ci` plus
+  `just docs-contract-test`); Windows coverage comes from the native
+  `check (windows-latest)` job on the PR that produced the commit.
 - **Cross-compile builds follow `rust-toolchain.toml`.** v0.7.4 added
   `rust-toolchain.toml` (pins `1.96.1`), so `cargo build --target <cross>` uses
   that toolchain, not `stable`. The fork-release build job must `rustup target
