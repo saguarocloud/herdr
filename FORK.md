@@ -447,6 +447,31 @@ right = [
 
 ## History
 
+- **2026-10-18:** synced to upstream `v0.9.5` (81 commits from `v0.9.3`), a
+  hotfix one day after the `v0.9.4` feature release, so this picks up both.
+  15 conflicts, but only **one in fork code**: `src/client/shell/mouse.rs`,
+  where upstream added a doc comment to `handle_mouse` right after the fork's
+  `handle_statusline_mouse` — a plain union, keeping both. The other 14
+  (`CHANGELOG.md`, `Cargo.toml`/`Cargo.lock`, `docs/next/CHANGELOG.md`, the
+  en/ja/zh-cn `docs/next/website` pages, `src/client/input.rs`,
+  `src/raw_input.rs`) are byte-identical to `v0.9.3` on the fork (checked
+  per-file with `git diff v0.9.3 master -- <file>`), so they resolved to
+  upstream. As with the v0.9.3 sync, they conflict only because the merge base
+  sits between tags. Compiled clean on the first `--all-targets` clippy run.
+  Zig stays at 0.16.0 and `PROTOCOL_VERSION` stays at 22, so there is no
+  toolchain work and the handoff stays same-protocol.
+  Upstream moved `workers/plugin-marketplace` to its website repository
+  (`ffa0892e`), so `just check` has no marketplace bun suite now. A stale,
+  ignored `node_modules` may still sit in that directory locally.
+  Behavior change to know about: on Linux/macOS, closing the launching shell
+  no longer stops the server (#4920), so stop it with `herdr server stop` or
+  `SIGTERM`, not `SIGHUP`.
+  Validation: fmt, clippy `--all-targets -D warnings`, **3923/3923 nextest**,
+  maintenance + ui-hot-path + fork script tests, and the bun release-workflow,
+  docs, and integration-asset suites. `just windows-lint` still waits on the
+  Microsoft SDK setup, which has deliberately not been accepted, so CI's
+  native `check (windows-latest)` covers it.
+
 - **2026-09-30:** synced to upstream `v0.9.3` (96 commits from `v0.9.1`), which
   is a hotfix one day after `v0.9.2` — so this picks up both. **Zero Rust
   conflicts.** All 15 conflicts were upstream-owned docs/metadata
